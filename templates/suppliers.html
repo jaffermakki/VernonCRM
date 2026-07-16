@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><div class="eyebrow">Inventory</div><h1>Suppliers</h1></div>
+  <div class="quick-actions"><a href="/purchase-orders" class="btn-secondary" style="padding:9px 16px;border-radius:8px;font-weight:700">📋 Purchase Orders</a></div>
+</div>
+
+<div class="card">
+  <h2>Add Supplier</h2>
+  <form method="post" action="/suppliers/add" class="form-row" style="align-items:flex-end;flex-wrap:wrap">
+    <div class="form-group"><label>Name</label><input name="name" required></div>
+    <div class="form-group"><label>Contact Name</label><input name="contact_name"></div>
+    <div class="form-group"><label>Email</label><input name="email" type="email"></div>
+    <div class="form-group"><label>Phone</label><input name="phone"></div>
+    <div class="form-group"><label>Lead Time (days)</label><input name="lead_time_days" type="number" value="7"></div>
+    <button class="btn-primary">Add</button>
+  </form>
+</div>
+
+<div class="card">
+  <table>
+    <thead><tr><th>Name</th><th>Contact</th><th>Email</th><th>Phone</th><th>Lead Time</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+      {% for s in suppliers %}
+      <tr>
+        <td>{{ s.name }}</td>
+        <td class="text-muted">{{ s.contact_name or '—' }}</td>
+        <td class="text-muted">{{ s.email or '—' }}</td>
+        <td class="text-muted">{{ s.phone or '—' }}</td>
+        <td>{{ s.lead_time_days }} days</td>
+        <td>{% if s.active %}<span class="badge badge-green">Active</span>{% else %}<span class="badge badge-red">Inactive</span>{% endif %}</td>
+        <td>
+          <form method="post" action="/suppliers/{{ s.id }}/toggle">
+            <button class="btn-secondary btn-sm">{{ 'Deactivate' if s.active else 'Activate' }}</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7"><div class="empty-state"><div class="icon">🚚</div>No suppliers yet — add one above to start creating purchase orders.</div></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

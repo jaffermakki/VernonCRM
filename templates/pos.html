@@ -1,0 +1,580 @@
+{% extends "base.html" %}
+{% block content %}
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  .content { padding: 0 !important; }
+  :root { --pos-height: calc(100vh - 57px); }
+  .pos-root { height: var(--pos-height); display: flex; overflow: hidden; background: #0f1117; }
+  .prod-tile { transition: transform .12s, box-shadow .12s; }
+  .prod-tile:active { transform: scale(.97); }
+  .cart-scroll { scrollbar-width: thin; scrollbar-color: #2a2f3d transparent; }
+  .pay-pill { transition: all .15s; cursor: pointer; }
+  .pay-pill.active { background: #ffd34d !important; color: #000 !important; border-color: #ffd34d !important; }
+  .chip { padding:5px 11px; border-radius:999px; font-size:11.5px; font-weight:600; white-space:nowrap;
+    background:#1e222e; color:#9aa1b5; border:1px solid #2a2f3d; transition:all .12s; cursor:pointer; }
+  .chip:hover { border-color:#3a4155; color:#e8eaf0; }
+  .chip.active { background:#ffd34d; color:#000; border-color:#ffd34d; font-weight:700; }
+  .prod-tile { box-shadow:0 1px 2px rgba(0,0,0,.25); }
+  .prod-tile:hover { box-shadow:0 4px 14px -6px rgba(0,0,0,.5); transform:translateY(-1px); }
+  #charge-btn:not(:disabled) { box-shadow:0 4px 16px -6px rgba(255,211,77,.45); }
+</style>
+
+<div class="pos-root">
+
+  <!-- LEFT: Product Browser -->
+  <div class="flex flex-col" style="flex:1.5;border-right:1px solid #1e222e;overflow:hidden">
+
+    <!-- Search + Filters -->
+    <div class="flex gap-2 p-3 flex-wrap" style="background:#171a23;border-bottom:1px solid #1e222e">
+      <form method="post" action="/pos/scan" class="flex-1 flex gap-2" style="min-width:200px">
+        <input name="sku" id="sku-search" placeholder="Scan barcode or search SKU..." autofocus
+          class="flex-1 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-yellow-400"
+          style="background:#1e222e;border:1px solid #2a2f3d">
+        <button type="submit" class="px-3 py-2 rounded-lg text-sm text-gray-300" style="background:#2a2f3d">Go</button>
+      </form>
+    </div>
+
+    <div class="flex gap-1.5 px-3 pt-2.5 pb-1 flex-wrap items-center" style="background:#171a23;border-bottom:1px solid #1e222e">
+      <span class="text-xs font-semibold mr-0.5" style="color:#6b7280">Category</span>
+      <button type="button" class="chip active" data-chipgroup="cat" data-value="" onclick="setCatFilter(this,'')">All</button>
+      {% for key, label in category_labels.items() %}
+      <button type="button" class="chip" data-chipgroup="cat" data-value="{{ key }}" onclick="setCatFilter(this,'{{ key }}')">{{ label }}</button>
+      {% endfor %}
+    </div>
+    {% if all_brands %}
+    <div class="flex gap-1.5 px-3 pb-2.5 flex-wrap items-center" style="background:#171a23;border-bottom:1px solid #1e222e">
+      <span class="text-xs font-semibold mr-0.5" style="color:#6b7280">Brand</span>
+      <button type="button" class="chip active" data-chipgroup="brand" data-value="" onclick="setBrandFilter(this,'')">All</button>
+      {% for b in all_brands %}
+      <button type="button" class="chip" data-chipgroup="brand" data-value="{{ b }}" onclick="setBrandFilter(this,'{{ b }}')">{{ b }}</button>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if scan_error %}
+    <div class="mx-3 mt-2 px-3 py-2 rounded-lg text-xs" style="background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);color:#f87171">{{ scan_error }}</div>
+    {% endif %}
+
+    {% if repair_ctx %}
+    <div class="mx-3 mt-2 px-3 py-2 rounded-lg text-xs flex items-center justify-between" style="background:rgba(96,165,250,.1);border:1px solid rgba(96,165,250,.3);color:#93c5fd">
+      <span>🔧 Charging for Repair <a href="/repairs/{{ repair_ctx.id }}" style="color:#93c5fd;text-decoration:underline">#{{ repair_ctx.ticket_no }}</a> — {{ repair_ctx.device }}</span>
+    </div>
+    {% endif %}
+
+    <!-- Product grid -->
+    <div class="flex-1 overflow-y-auto cart-scroll p-3">
+      <div class="grid gap-2" style="grid-template-columns:repeat(auto-fill,minmax(140px,1fr))" id="pos-product-grid">
+        {% for g in product_groups %}
+        <div class="prod-tile prod-tile-group cursor-pointer rounded-xl p-3 flex flex-col gap-1 select-none"
+             style="background:#171a23;border:1px solid #2a2f3d;position:relative"
+             data-categories="{{ g.categories|join('|')|e }}"
+             data-brands="{{ g.brands|join('|')|e }}"
+             onclick="openVariantPicker('{{ g.name|e }}')"
+             onmouseover="this.style.borderColor='#5eead4'"
+             onmouseout="this.style.borderColor='#2a2f3d'">
+          <div class="flex justify-between items-start">
+            <span class="text-xs px-1.5 py-0.5 rounded font-medium" style="background:rgba(94,234,212,.12);color:#5eead4">
+              {{ g.variants|length }} options
+            </span>
+            {% if g.low_stock %}<span class="text-xs" style="color:#f87171" title="At least one variant is low on stock">⚠️</span>{% endif %}
+          </div>
+          <div class="font-semibold text-sm leading-tight mt-1" style="color:#e8eaf0">{{ g.name }}</div>
+          <div class="text-xs" style="color:#6b7280">Pick model &amp; color</div>
+          <div class="font-bold text-base mt-auto" style="color:#ffd34d">
+            {% if g.min_price == g.max_price %}${{ "%.2f"|format(g.min_price) }}
+            {% else %}${{ "%.2f"|format(g.min_price) }}–{{ "%.2f"|format(g.max_price) }}{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+
+        {% for p in ungrouped_products %}
+        <div class="prod-tile cursor-pointer rounded-xl p-3 flex flex-col gap-1 select-none"
+             style="background:#171a23;border:1px solid #2a2f3d"
+             data-pid="{{ p.id }}"
+             data-name="{{ p.name|e }}"
+             data-sku="{{ p.sku|e }}"
+             data-price="{{ p.price }}"
+             data-stock="{{ p.stock }}"
+             data-category="{{ p.category }}"
+             data-brand="{{ p.subcategory|e }}"
+             onclick="openPriceModal(this.dataset)"
+             onmouseover="this.style.borderColor='#ffd34d'"
+             onmouseout="this.style.borderColor='#2a2f3d'">
+          <div class="flex justify-between items-start">
+            <span class="text-xs px-1.5 py-0.5 rounded font-medium"
+              style="{% if p.stock <= 0 %}background:rgba(248,113,113,.15);color:#f87171{% elif p.stock <= p.reorder_threshold %}background:rgba(251,191,36,.15);color:#fbbf24{% else %}background:rgba(74,222,128,.12);color:#4ade80{% endif %}">
+              {% if p.stock <= 0 %}Out{% else %}{{ p.stock }}{% endif %}
+            </span>
+            {% if p.subcategory %}
+            <span class="text-xs truncate" style="color:#6b7280;max-width:70px">{{ p.subcategory }}</span>
+            {% endif %}
+          </div>
+          <div class="font-semibold text-sm leading-tight mt-1" style="color:#e8eaf0">{{ p.name }}</div>
+          <div class="text-xs font-mono" style="color:#6b7280">{{ p.sku }}</div>
+          <div class="font-bold text-base mt-auto" style="color:#ffd34d">${{ "%.2f"|format(p.price) }}</div>
+        </div>
+        {% else %}
+        {% if not product_groups %}
+        <div class="col-span-full text-center py-12 text-sm" style="color:#4b5563">No products yet</div>
+        {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: Cart + Payment -->
+  <div class="flex flex-col" style="width:380px;min-width:340px;background:#171a23;box-shadow:-8px 0 24px -16px rgba(0,0,0,.6)">
+
+    <!-- Customer selector -->
+    <div class="p-3 flex gap-2" style="border-bottom:1px solid #1e222e">
+      <form method="post" action="/pos/customer" class="flex-1">
+        <select name="customer_id" onchange="this.form.submit()"
+          class="w-full rounded-lg px-3 py-2 text-sm focus:outline-none"
+          style="background:#0f1117;border:1px solid #2a2f3d;color:#e8eaf0">
+          <option value="">Walk-in Customer</option>
+          {% for c in customers %}
+          <option value="{{ c.id }}" {% if c.id==customer_id %}selected{% endif %}>{{ c.name }}</option>
+          {% endfor %}
+        </select>
+      </form>
+      <button onclick="document.getElementById('hold-panel').classList.toggle('hidden')"
+        class="px-3 py-2 rounded-lg text-xs font-medium whitespace-nowrap"
+        style="background:#2a2f3d;color:#9aa1b5">
+        Hold {% if held_carts %}({{ held_carts|length }}){% endif %}
+      </button>
+    </div>
+
+    <!-- Loyalty panel -->
+    {% if selected_customer %}
+    <div class="mx-3 mt-2 rounded-xl p-2.5" style="background:rgba(255,211,77,.06);border:1px solid rgba(255,211,77,.2)">
+      <div class="flex justify-between items-center mb-2">
+        <span class="font-semibold text-sm" style="color:#ffd34d">{{ selected_customer.name }}</span>
+        <span class="text-xs" style="color:#6b7280">${{ "%.2f"|format(selected_customer.spent) }} spent</span>
+      </div>
+      <div class="flex gap-2">
+        <form method="post" action="/pos/redeem-points" class="flex gap-1 flex-1">
+          <input type="number" name="points" min="{{ points_redeem_rate|int }}" step="{{ points_redeem_rate|int }}"
+            placeholder="{{ selected_customer.points }}pts"
+            class="w-full rounded px-2 py-1 text-xs text-white" style="background:#0f1117;border:1px solid #2a2f3d"
+            {% if selected_customer.points < points_redeem_rate %}disabled{% endif %}>
+          <button class="px-2 py-1 rounded text-xs font-bold"
+            style="background:#b45309;color:#fef3c7">Pts</button>
+        </form>
+        <form method="post" action="/pos/redeem-credit" class="flex gap-1 flex-1">
+          <input type="number" name="amount" min="0.01" step="0.01" max="{{ selected_customer.store_credit }}"
+            placeholder="${{ '%.0f'|format(selected_customer.store_credit) }} cr"
+            class="w-full rounded px-2 py-1 text-xs text-white" style="background:#0f1117;border:1px solid #2a2f3d"
+            {% if selected_customer.store_credit <= 0 %}disabled{% endif %}>
+          <button class="px-2 py-1 rounded text-xs font-bold"
+            style="background:#166534;color:#bbf7d0">Cr</button>
+        </form>
+      </div>
+      {% if loyalty_discount>0 %}<div class="text-xs mt-1.5" style="color:#4ade80">✓ ${{ "%.2f"|format(loyalty_discount) }} loyalty applied</div>{% endif %}
+      {% if store_credit_used>0 %}<div class="text-xs" style="color:#4ade80">✓ ${{ "%.2f"|format(store_credit_used) }} credit applied</div>{% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Held carts panel -->
+    <div id="hold-panel" class="hidden mx-3 mt-2 rounded-xl p-2" style="background:#0f1117;border:1px solid #2a2f3d">
+      <div class="text-xs font-semibold mb-1.5" style="color:#6b7280">Held Carts</div>
+      {% for h in held_carts %}
+      <div class="flex items-center justify-between py-1.5" style="border-bottom:1px solid #1e222e">
+        <span class="text-sm" style="color:#e8eaf0">{{ h.name }}</span>
+        <div class="flex gap-1">
+          <form method="post" action="/pos/recall/{{ h.id }}">
+            <button class="px-2 py-1 rounded text-xs font-bold" style="background:#b45309;color:#fef3c7">Recall</button>
+          </form>
+          <form method="post" action="/pos/held/{{ h.id }}/delete" onsubmit="return confirm('Delete?')">
+            <button class="px-2 py-1 rounded text-xs" style="background:#2a2f3d;color:#9aa1b5">✕</button>
+          </form>
+        </div>
+      </div>
+      {% else %}
+      <div class="text-xs text-center py-2" style="color:#4b5563">No held carts</div>
+      {% endfor %}
+      <form method="post" action="/pos/hold" class="flex gap-1 mt-2">
+        <input name="name" placeholder="Name this cart..."
+          class="flex-1 rounded px-2 py-1.5 text-xs text-white" style="background:#1e222e;border:1px solid #2a2f3d">
+        <button class="px-3 py-1.5 rounded text-xs font-medium" style="background:#2a2f3d;color:#9aa1b5"
+          {% if not cart %}disabled{% endif %}>Hold</button>
+      </form>
+    </div>
+
+    <!-- Cart items -->
+    <div class="px-3 pt-2.5 pb-1 flex items-center justify-between" style="border-bottom:1px solid #1e222e">
+      <span class="text-xs font-bold uppercase tracking-wide" style="color:#6b7280">Cart</span>
+      {% if cart %}
+      <span class="text-xs font-bold px-2 py-0.5 rounded-full" style="background:rgba(255,211,77,.15);color:#ffd34d">{{ cart|length }} item{{ 's' if cart|length != 1 }}</span>
+      {% endif %}
+    </div>
+    <div class="flex-1 overflow-y-auto cart-scroll px-3 py-2">
+      {% if cart %}
+      {% for item in cart %}
+      <div class="flex items-center gap-2 py-2" style="border-bottom:1px solid #1e222e">
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium truncate" style="color:#e8eaf0">{{ item.name }}</div>
+          <div class="text-xs font-mono" style="color:#6b7280">${{ "%.2f"|format(item.price) }}</div>
+        </div>
+        <form method="post" action="/pos/qty/{{ loop.index0 }}" class="flex items-center gap-1">
+          <button name="qty" value="{{ item.qty - 1 }}"
+            class="w-7 h-7 flex items-center justify-center rounded font-bold text-sm"
+            style="background:#2a2f3d;color:#9aa1b5">−</button>
+          <span class="w-6 text-center font-bold text-sm" style="color:#e8eaf0">{{ item.qty }}</span>
+          <button name="qty" value="{{ item.qty + 1 }}"
+            class="w-7 h-7 flex items-center justify-center rounded font-bold text-sm"
+            style="background:#2a2f3d;color:#9aa1b5">+</button>
+        </form>
+        <div class="font-bold text-sm w-16 text-right" style="color:#e8eaf0">${{ "%.2f"|format(item.price * item.qty) }}</div>
+        <form method="post" action="/pos/remove/{{ loop.index0 }}">
+          <button class="w-6 h-6 flex items-center justify-center rounded" style="color:#4b5563" onmouseover="this.style.color='#f87171'" onmouseout="this.style.color='#4b5563'">✕</button>
+        </form>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="flex flex-col items-center justify-center h-full gap-2 py-8" style="color:#4b5563">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
+        <span class="text-sm">Cart is empty</span>
+        <span class="text-xs">Tap a product or scan a barcode</span>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Totals -->
+    <div class="px-3 py-2" style="border-top:1px solid #1e222e">
+      <div class="flex items-center justify-between mb-1.5">
+        <span class="text-xs" style="color:#6b7280">Subtotal</span>
+        <form method="post" action="/pos/subtotal">
+          <input type="number" name="value" step="0.01" min="0" value="{{ '%.2f'|format(sub) }}"
+            class="w-24 rounded px-2 py-1 text-sm text-right font-bold focus:outline-none"
+            style="background:#0f1117;border:1px solid #2a2f3d;color:#e8eaf0"
+            onchange="this.form.submit()">
+        </form>
+      </div>
+      <div class="flex items-center justify-between mb-1.5">
+        <div class="flex items-center gap-1.5">
+          <span class="text-xs" style="color:#6b7280">Discount</span>
+          <form method="post" action="/pos/discount" id="disc-main-form">
+            <input type="hidden" name="mode" id="disc-mode-field" value="{{ disc_mode }}">
+            <span class="flex rounded overflow-hidden text-xs" style="border:1px solid #2a2f3d">
+              <button type="button" onclick="setDiscMode('$')"
+                class="px-2 py-0.5 font-bold" id="disc-btn-dollar"
+                style="{% if disc_mode=='$' %}background:#ffd34d;color:#000{% else %}background:#1e222e;color:#6b7280{% endif %}">$</button>
+              <button type="button" onclick="setDiscMode('%')"
+                class="px-2 py-0.5 font-bold" id="disc-btn-pct"
+                style="{% if disc_mode=='%' %}background:#ffd34d;color:#000{% else %}background:#1e222e;color:#6b7280{% endif %}">%</button>
+              <input type="number" name="value" id="disc-input" step="0.01" min="0" value="{{ disc_raw }}"
+                class="w-16 px-2 py-0.5 text-sm text-right focus:outline-none"
+                style="background:#0f1117;color:#e8eaf0"
+                onchange="this.form.submit()">
+            </span>
+          </form>
+        </div>
+        {% if disc_mode=='%' and disc_raw>0 %}
+        <span class="text-xs" style="color:#6b7280">= ${{ "%.2f"|format(disc) }} off</span>
+        {% endif %}
+      </div>
+      {% if disc>0 %}
+      <div class="flex justify-between text-xs mb-0.5" style="color:#4ade80"><span>Discount</span><span>−${{ "%.2f"|format(disc) }}</span></div>
+      {% endif %}
+      {% for tl in tax.lines %}
+      <div class="flex justify-between text-xs mb-0.5" style="color:#9aa1b5"><span>{{ tl.label }}</span><span>${{ "%.2f"|format(tl.amount) }}</span></div>
+      {% endfor %}
+      <div class="flex justify-between items-center mt-2 pt-2" style="border-top:2px solid #ffd34d">
+        <span class="font-bold text-lg" style="color:#e8eaf0">Total</span>
+        <span class="font-bold text-2xl" style="color:#ffd34d">${{ "%.2f"|format(total) }}</span>
+      </div>
+    </div>
+
+    <!-- Payment -->
+    <div class="p-3" style="border-top:1px solid #1e222e;background:#0f1117">
+      <!-- Payment pills -->
+      <div class="flex gap-1.5 mb-3 flex-wrap">
+        {% for pm in ["Cash","Card","UPI","E-Transfer","Store Credit","Split"] %}
+        <button type="button" onclick="selectPayment('{{ pm }}')"
+          id="pm-{{ pm|replace(' ','_') }}"
+          class="pay-pill px-3 py-1.5 rounded-full text-xs font-semibold"
+          style="border:1px solid #2a2f3d;background:#1e222e;color:#6b7280">{{ pm }}</button>
+        {% endfor %}
+      </div>
+
+      <!-- Cash section -->
+      <div id="section-Cash">
+        <div class="flex gap-2 mb-2">
+          <div class="flex-1">
+            <div class="text-xs mb-1" style="color:#6b7280">Tendered</div>
+            <input type="number" id="tendered-input" step="0.01" min="0" placeholder="0.00"
+              class="w-full rounded-lg px-3 py-2 text-base font-bold focus:outline-none"
+              style="background:#1e222e;border:1px solid #2a2f3d;color:#e8eaf0"
+              oninput="updateChange()">
+          </div>
+          <div class="flex-1">
+            <div class="text-xs mb-1" style="color:#6b7280">Change</div>
+            <div id="change-display" class="w-full rounded-lg px-3 py-2 text-base font-bold"
+              style="background:#1e222e;border:1px solid #2a2f3d;color:#9aa1b5">$0.00</div>
+          </div>
+        </div>
+        <div class="grid grid-cols-4 gap-1 mb-2">
+          {% for amt in [5,10,20,50,100,200] %}
+          <button type="button" onclick="setTendered({{ amt }})"
+            class="py-1.5 rounded text-xs font-medium" style="background:#1e222e;color:#9aa1b5">${{ amt }}</button>
+          {% endfor %}
+          <button type="button" onclick="setExact()"
+            class="col-span-2 py-1.5 rounded text-xs font-bold" style="background:#1e222e;color:#ffd34d">Exact</button>
+        </div>
+      </div>
+
+      <!-- Split payment -->
+      <div id="section-Split" class="hidden mb-2">
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <div class="text-xs mb-1" style="color:#6b7280">Cash</div>
+            <input type="number" id="split-cash" step="0.01" min="0" placeholder="0.00"
+              class="w-full rounded-lg px-3 py-2 font-bold focus:outline-none"
+              style="background:#1e222e;border:1px solid #2a2f3d;color:#e8eaf0"
+              oninput="updateSplitChange()">
+          </div>
+          <div>
+            <div class="text-xs mb-1" style="color:#6b7280">Card</div>
+            <input type="number" id="split-card" step="0.01" min="0" placeholder="0.00"
+              class="w-full rounded-lg px-3 py-2 font-bold focus:outline-none"
+              style="background:#1e222e;border:1px solid #2a2f3d;color:#e8eaf0"
+              oninput="updateSplitChange()">
+          </div>
+        </div>
+        <div id="split-status" class="text-xs mt-1 text-right" style="color:#6b7280"></div>
+      </div>
+
+      <!-- UPI info -->
+      <div id="section-UPI" class="hidden mb-2 rounded-lg p-2.5 text-center" style="background:#1e222e;border:1px solid #2a2f3d">
+        <div class="text-xs mb-1" style="color:#9aa1b5">Ask customer to scan your UPI QR</div>
+        <div class="font-bold text-lg" style="color:#ffd34d">${{ "%.2f"|format(total) }}</div>
+      </div>
+
+      <!-- Hidden checkout form -->
+      <form method="post" action="/pos/checkout" id="checkout-form">
+        <input type="hidden" name="payment_method" id="final-payment-method" value="Cash">
+        <input type="hidden" name="tendered" id="final-tendered" value="0">
+        <input type="hidden" name="cash_part" id="final-cash-part" value="0">
+        <input type="hidden" name="card_part" id="final-card-part" value="0">
+
+        <button type="button" onclick="submitCheckout()" id="charge-btn"
+          class="w-full py-4 rounded-xl font-bold text-lg transition-all"
+          style="{% if cart %}background:#ffd34d;color:#000{% else %}background:#1e222e;color:#4b5563;cursor:not-allowed{% endif %}"
+          {% if not cart %}disabled{% endif %}>
+          Charge ${{ "%.2f"|format(total) }}
+        </button>
+      </form>
+
+      <form method="post" action="/pos/clear" class="mt-2">
+        <button class="w-full py-2 text-xs" style="color:#4b5563">Clear Cart</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Price Modal -->
+<div id="price-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:2000;align-items:center;justify-content:center;padding:16px">
+  <div class="rounded-2xl p-6 w-full shadow-2xl" style="background:#1e222e;border:1px solid #343a4a;max-width:320px">
+    <div class="flex justify-between items-start mb-1">
+      <h3 id="pm-title" class="font-bold text-lg leading-tight flex-1" style="color:#e8eaf0"></h3>
+      <button onclick="closePriceModal()" class="text-xl ml-2" style="color:#6b7280">✕</button>
+    </div>
+    <div id="pm-sku" class="text-xs font-mono mb-4" style="color:#6b7280"></div>
+    <div id="pm-stock-warn" class="hidden text-xs mb-3 rounded-lg px-3 py-2" style="background:rgba(248,113,113,.1);color:#f87171">⚠️ Out of stock</div>
+    <form method="post" action="/pos/add-custom">
+      <input type="hidden" name="product_id" id="pm-product-id">
+      <label class="text-xs block mb-1.5" style="color:#6b7280">Price for this sale</label>
+      <input type="number" name="custom_price" id="pm-price" step="0.01" min="0" required
+        class="w-full rounded-xl px-4 py-3 text-2xl font-bold text-center focus:outline-none mb-1"
+        style="background:#0f1117;border:2px solid #ffd34d;color:#ffd34d">
+      <div class="text-xs text-center mb-4" style="color:#6b7280">Tax calculated at checkout</div>
+      <div class="grid grid-cols-2 gap-3">
+        <button type="button" onclick="closePriceModal()"
+          class="py-3 rounded-xl font-semibold" style="background:#2a2f3d;color:#9aa1b5">Cancel</button>
+        <button type="submit"
+          class="py-3 rounded-xl font-bold" style="background:#ffd34d;color:#000">Add to Cart</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Variant Picker Modal — shown when a grouped case tile is clicked -->
+<div id="variant-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:2000;align-items:center;justify-content:center;padding:16px">
+  <div class="rounded-2xl p-5 w-full shadow-2xl" style="background:#1e222e;border:1px solid #343a4a;max-width:380px;max-height:80vh;display:flex;flex-direction:column">
+    <div class="flex justify-between items-start mb-1">
+      <h3 id="vm-title" class="font-bold text-lg leading-tight flex-1" style="color:#e8eaf0"></h3>
+      <button onclick="closeVariantPicker()" class="text-xl ml-2" style="color:#6b7280">✕</button>
+    </div>
+    <div class="text-xs mb-3" style="color:#6b7280">Pick the exact model &amp; color</div>
+    <div id="vm-list" class="overflow-y-auto" style="display:flex;flex-direction:column;gap:6px"></div>
+  </div>
+</div>
+
+<script id="variant-group-data" type="application/json">{{ variant_group_data|tojson }}</script>
+
+<script>
+const TOTAL = {{ total }};
+const CAT_SUBS = {{ cat_subcategories|tojson }};
+const VARIANT_GROUPS = JSON.parse(document.getElementById('variant-group-data').textContent);
+let currentPayment = 'Cash';
+let selectedCat = '';
+let selectedBrand = '';
+
+function filterProducts(){
+  document.querySelectorAll('#pos-product-grid .prod-tile:not(.prod-tile-group)').forEach(tile => {
+    const mc = !selectedCat || tile.dataset.category === selectedCat;
+    const mb = !selectedBrand || tile.dataset.brand === selectedBrand;
+    tile.style.display = (mc && mb) ? '' : 'none';
+  });
+  // Grouped tiles: show if ANY variant inside matches the active filter —
+  // a case type spanning multiple phone brands shouldn't disappear just
+  // because one brand chip is selected.
+  document.querySelectorAll('#pos-product-grid .prod-tile-group').forEach(tile => {
+    const cats = (tile.dataset.categories || '').split('|');
+    const brands = (tile.dataset.brands || '').split('|');
+    const mc = !selectedCat || cats.includes(selectedCat);
+    const mb = !selectedBrand || brands.includes(selectedBrand);
+    tile.style.display = (mc && mb) ? '' : 'none';
+  });
+}
+function setCatFilter(btn, value){
+  selectedCat = value;
+  document.querySelectorAll('[data-chipgroup="cat"]').forEach(c => c.classList.toggle('active', c === btn));
+  filterProducts();
+}
+function setBrandFilter(btn, value){
+  selectedBrand = value;
+  document.querySelectorAll('[data-chipgroup="brand"]').forEach(c => c.classList.toggle('active', c === btn));
+  filterProducts();
+}
+
+function openPriceModal(tile){
+  document.getElementById('pm-product-id').value = tile.pid;
+  document.getElementById('pm-title').textContent = tile.name;
+  document.getElementById('pm-sku').textContent = tile.sku;
+  document.getElementById('pm-price').value = parseFloat(tile.price).toFixed(2);
+  document.getElementById('pm-stock-warn').classList.toggle('hidden', parseInt(tile.stock) > 0);
+  document.getElementById('price-modal').style.display = 'flex';
+  setTimeout(() => { const i=document.getElementById('pm-price'); i.focus(); i.select(); }, 80);
+}
+function closePriceModal(){ document.getElementById('price-modal').style.display='none'; }
+document.getElementById('price-modal').addEventListener('click', e => { if(e.target===e.currentTarget) closePriceModal(); });
+document.addEventListener('keydown', e => { if(e.key==='Escape'){ closePriceModal(); closeVariantPicker(); } });
+
+function openVariantPicker(groupName){
+  const variants = VARIANT_GROUPS[groupName] || [];
+  document.getElementById('vm-title').textContent = groupName;
+  const list = document.getElementById('vm-list');
+  list.innerHTML = '';
+
+  variants.forEach(v => {
+    const out = v.stock <= 0;
+    const low = !out && v.stock <= v.reorder_threshold;
+    const badgeColor = out ? '#f87171' : (low ? '#fbbf24' : '#4ade80');
+    const badgeBg = out ? 'rgba(248,113,113,.15)' : (low ? 'rgba(251,191,36,.15)' : 'rgba(74,222,128,.12)');
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;text-align:left;background:#171a23;border:1px solid #2a2f3d;border-radius:10px;padding:10px 12px;cursor:pointer;width:100%';
+    // Built via textContent/DOM properties throughout, not string
+    // interpolation — safe regardless of apostrophes or quotes in a
+    // product's actual name.
+    btn.innerHTML = `
+      <span>
+        <span class="vm-name" style="display:block;font-weight:600;font-size:13px;color:#e8eaf0"></span>
+        <span class="vm-meta" style="display:block;font-size:11px;color:#6b7280;font-family:monospace"></span>
+      </span>
+      <span style="text-align:right;flex-shrink:0">
+        <span class="vm-stock" style="display:block;font-size:10px;font-weight:600;padding:2px 6px;border-radius:5px;background:${badgeBg};color:${badgeColor}"></span>
+        <span class="vm-price" style="display:block;font-size:13px;font-weight:700;color:#ffd34d;margin-top:3px"></span>
+      </span>`;
+    btn.querySelector('.vm-name').textContent = v.name;
+    btn.querySelector('.vm-meta').textContent = v.sku + (v.brand ? ' · ' + v.brand : '');
+    btn.querySelector('.vm-stock').textContent = out ? 'Out' : v.stock + ' left';
+    btn.querySelector('.vm-price').textContent = '$' + parseFloat(v.price).toFixed(2);
+    btn.addEventListener('click', () => selectVariant(v));
+    list.appendChild(btn);
+  });
+
+  document.getElementById('variant-modal').style.display = 'flex';
+}
+function selectVariant(v){
+  closeVariantPicker();
+  openPriceModal(v);
+}
+function closeVariantPicker(){ document.getElementById('variant-modal').style.display='none'; }
+document.getElementById('variant-modal').addEventListener('click', e => { if(e.target===e.currentTarget) closeVariantPicker(); });
+
+function updateChange(){
+  const t = parseFloat(document.getElementById('tendered-input').value||0);
+  const c = Math.max(0, t-TOTAL);
+  const el = document.getElementById('change-display');
+  el.textContent = '$'+c.toFixed(2);
+  el.style.color = c>0 ? '#4ade80' : '#9aa1b5';
+}
+function setTendered(amt){ document.getElementById('tendered-input').value=amt.toFixed(2); updateChange(); }
+function setExact(){ document.getElementById('tendered-input').value=TOTAL.toFixed(2); updateChange(); }
+
+function updateSplitChange(){
+  const cash = parseFloat(document.getElementById('split-cash').value||0);
+  const card = parseFloat(document.getElementById('split-card').value||0);
+  const diff = (cash+card)-TOTAL;
+  const el = document.getElementById('split-status');
+  if(!cash && !card){ el.textContent=''; return; }
+  if(diff<0){ el.textContent=`Short by $${Math.abs(diff).toFixed(2)}`; el.style.color='#f87171'; }
+  else if(diff>0){ el.textContent=`Change: $${diff.toFixed(2)}`; el.style.color='#4ade80'; }
+  else { el.textContent='Exact amount'; el.style.color='#4ade80'; }
+}
+
+function selectPayment(pm){
+  currentPayment = pm;
+  document.querySelectorAll('.pay-pill').forEach(b=>{
+    b.classList.remove('active');
+    b.style.background='#1e222e';
+    b.style.color='#6b7280';
+    b.style.borderColor='#2a2f3d';
+  });
+  const btn = document.getElementById('pm-'+pm.replace(/ /g,'_'));
+  if(btn){ btn.classList.add('active'); btn.style.background='#ffd34d'; btn.style.color='#000'; btn.style.borderColor='#ffd34d'; }
+
+  ['Cash','Split','UPI'].forEach(s=>{
+    const el=document.getElementById('section-'+s);
+    if(el) el.classList.toggle('hidden', s!==pm);
+  });
+}
+
+function setDiscMode(mode){
+  document.getElementById('disc-mode-field').value = mode;
+  const d = document.getElementById('disc-btn-dollar');
+  const p = document.getElementById('disc-btn-pct');
+  if(mode==='$'){ d.style.background='#ffd34d';d.style.color='#000';p.style.background='#1e222e';p.style.color='#6b7280'; }
+  else { p.style.background='#ffd34d';p.style.color='#000';d.style.background='#1e222e';d.style.color='#6b7280'; }
+  document.getElementById('disc-main-form').submit();
+}
+
+function submitCheckout(){
+  const pm = currentPayment;
+  document.getElementById('final-payment-method').value = pm;
+  if(pm==='Split'){
+    const cash=parseFloat(document.getElementById('split-cash').value||0);
+    const card=parseFloat(document.getElementById('split-card').value||0);
+    if((cash+card)<TOTAL){ alert(`Split total ($${(cash+card).toFixed(2)}) is less than total ($${TOTAL.toFixed(2)})`); return; }
+    document.getElementById('final-cash-part').value=cash;
+    document.getElementById('final-card-part').value=card;
+    document.getElementById('final-tendered').value=0;
+  } else if(pm==='Cash'){
+    document.getElementById('final-tendered').value=document.getElementById('tendered-input').value||0;
+    document.getElementById('final-cash-part').value=0;
+    document.getElementById('final-card-part').value=0;
+  } else {
+    document.getElementById('final-tendered').value=0;
+    document.getElementById('final-cash-part').value=0;
+    document.getElementById('final-card-part').value=0;
+  }
+  document.getElementById('checkout-form').submit();
+}
+
+// Init
+selectPayment('Cash');
+</script>
+{% endblock %}

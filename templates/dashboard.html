@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% block content %}
+{% if backup_warning %}
+<div class="card" style="border-color:#fbbf24;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+  <span>💾 {{ backup_warning }} Export a backup to keep your data safe.</span>
+  <a href="/export/backup" class="btn-secondary btn-sm">Export Now</a>
+</div>
+{% endif %}
+
+{% if checklist %}
+<div class="card checklist-card">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <h2 style="margin:0">Get your shop set up <span class="text-muted" style="font-weight:400">({{ checklist.done_count }}/{{ checklist.total }})</span></h2>
+    <form method="post" action="/dashboard/dismiss-checklist"><button type="submit" class="btn-secondary btn-sm">Dismiss</button></form>
+  </div>
+  <div class="checklist-progress"><div class="checklist-progress-bar" style="width:{{ (checklist.done_count / checklist.total * 100)|round|int }}%"></div></div>
+  <div class="checklist-items">
+    {% for item in checklist.entries %}
+    <a href="{{ item.href }}" class="checklist-item {{ 'done' if item.done }}">
+      <span class="checklist-dot">{{ '✓' if item.done else '' }}</span>
+      <span>{{ item.label }}</span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<div class="page-head">
+  <div>
+    <div class="eyebrow">{{ staff.name }} · {{ staff.role }}</div>
+    <h1>{{ shop_name }}</h1>
+  </div>
+  <div class="quick-actions">
+    <a href="/pos" class="btn-primary" style="padding:9px 16px;border-radius:8px;font-weight:700">🛒 New Sale</a>
+    <a href="/repairs" class="btn-secondary" style="padding:9px 16px;border-radius:8px;font-weight:700">🔧 New Repair</a>
+  </div>
+</div>
+
+<div class="range-tabs">
+  {% for key, label in range_labels.items() %}
+  <a href="/?range={{ key }}" class="{{ 'active' if range == key }}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+<div class="pulse-card">
+  <div class="pulse-scanline"></div>
+  <div class="pulse-head">
+    <div>
+      <div class="pulse-label"><span class="pulse-live-dot"></span>Shop Pulse — Sales, {{ range_label }}</div>
+      <div class="pulse-value text-green">${{ "%.2f"|format(sales_total) }}</div>
+      <div class="pulse-sub">
+        {% if sales_trend_pct > 0 %}<span class="text-green">▲ {{ sales_trend_pct }}%</span>
+        {% elif sales_trend_pct < 0 %}<span class="text-red">▼ {{ sales_trend_pct|abs }}%</span>
+        {% else %}<span class="text-muted">— flat</span>{% endif %}
+        vs. previous period · {{ count_total }} invoice{{ 's' if count_total != 1 }}
+      </div>
+    </div>
+  </div>
+  <div class="pulse-scope">
+    <svg id="pulseSvg" viewBox="0 0 700 120" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="pulseFillGradient" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#5eead4" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="#5eead4" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <line class="pulse-grid-line" x1="0" y1="20" x2="700" y2="20"/>
+      <line class="pulse-grid-line" x1="0" y1="60" x2="700" y2="60"/>
+      <line class="pulse-grid-line" x1="0" y1="100" x2="700" y2="100"/>
+      <path id="pulseFill" class="pulse-fill" d=""/>
+      <path id="pulseTrace" class="pulse-trace" d=""/>
+      <circle id="pulseDot" class="pulse-dot-marker" r="4">
+        <animateMotion id="pulseDotMotion" dur="4s" repeatCount="indefinite" rotate="0"/>
+      </circle>
+    </svg>
+  </div>
+  <div class="pulse-day-labels">
+    {% for d in trend_days %}<span>{{ d }}</span>{% endfor %}
+  </div>
+</div>
+
+<div class="stat-grid" style="grid-template-columns:repeat(3,1fr)">
+  <div class="stat-card">
+    <div class="stat-label">Invoices — {{ range_label }}</div>
+    <div class="stat-value">{{ count_total }}</div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-end">
+      {% if count_trend_pct > 0 %}
+      <div class="stat-trend up">▲ {{ count_trend_pct }}%</div>
+      {% elif count_trend_pct < 0 %}
+      <div class="stat-trend down">▼ {{ count_trend_pct|abs }}%</div>
+      {% else %}
+      <div class="stat-trend flat">— flat</div>
+      {% endif %}
+      <svg class="sparkline" viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="{{ count_spark }}" fill="none" stroke="#60a5fa" stroke-width="2"/></svg>
+    </div>
+  </div>
+  <div class="stat-card">
+    <span class="stat-icon">🔧</span>
+    <div class="stat-label">Open Repairs</div>
+    <div class="stat-value {{ 'text-red' if open_repairs_count > 0 else '' }}">{{ open_repairs_count }}</div>
+    <div class="stat-trend flat"><a href="/repairs">view board →</a></div>
+  </div>
+  <div class="stat-card">
+    <span class="stat-icon">📦</span>
+    <div class="stat-label">Low Stock Items</div>
+    <div class="stat-value {{ 'text-red' if low_stock|length > 0 else '' }}">{{ low_stock|length }}</div>
+    <div class="stat-trend flat">{% if staff.role in ['owner','manager'] %}<a href="/products/reorder">reorder list →</a>{% else %}low stock items{% endif %}</div>
+  </div>
+</div>
+
+<div class="dash-cols">
+  <div>
+    <div class="card">
+      <h2>Recent Invoices</h2>
+      <table>
+        <thead><tr><th>#</th><th>Customer</th><th>Items</th><th>Total</th><th>Date</th></tr></thead>
+        <tbody>
+          {% for inv in recent_invoices %}
+          <tr>
+            <td><a href="/invoices/{{ inv.id }}">{{ inv.number }}</a></td>
+            <td>
+              <span class="avatar-pill">{{ (inv.customer.name if inv.customer else 'Walk-in')[:1]|upper }}</span>
+              {{ inv.customer.name if inv.customer else 'Walk-in' }}
+            </td>
+            <td>{{ inv.lines|length }} item{{ 's' if inv.lines|length != 1 }}</td>
+            <td>${{ "%.2f"|format(inv.total) }}</td>
+            <td class="text-muted">{{ inv.date.strftime('%b %d, %H:%M') }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5">
+            <div class="empty-state"><div class="icon">🧾</div>No sales yet — head to Point of Sale to ring one up.</div>
+          </td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div>
+    {% if low_stock %}
+    <div class="card">
+      <h2>Low Stock {% if staff.role in ['owner','manager'] %}<a href="/products/reorder" class="btn-secondary btn-sm" style="float:right;font-weight:400">Reorder →</a>{% endif %}</h2>
+      <table>
+        <thead><tr><th>SKU</th><th>Name</th><th>Stock</th></tr></thead>
+        <tbody>
+          {% for p in low_stock %}
+          <tr><td class="text-muted">{{ p.sku }}</td><td>{{ p.name }}</td><td class="text-red">{{ p.stock }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="card">
+      <h2>Inventory</h2>
+      <div class="empty-state"><div class="icon">✅</div>All stock levels are healthy.</div>
+    </div>
+    {% endif %}
+
+    <div class="card">
+      <h2>Recent Activity</h2>
+      <div class="activity-feed">
+        {% for a in activity %}
+        <div class="activity-row">
+          <span class="activity-dot"></span>
+          <div>
+            <div><strong>{{ a.staff_name }}</strong> {{ a.action }}</div>
+            {% if a.detail %}<div class="text-muted" style="font-size:11px">{{ a.detail }}</div>{% endif %}
+            <div class="text-muted" style="font-size:10px">{{ a.ts.strftime('%b %d, %H:%M') }}</div>
+          </div>
+        </div>
+        {% else %}
+        <div class="empty-state"><div class="icon">📜</div>No activity recorded yet.</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Shop Pulse — builds a smooth oscilloscope-style trace through the real
+// trend data (no charting library; every point below is the actual sales
+// total for that day, just interpolated into a continuous curve the way
+// an analog scope would trace it).
+(function(){
+  const data = {{ trend_totals|tojson }};
+  const svg = document.getElementById('pulseSvg');
+  const W = 700, H = 120, PAD = 10;
+  if (!data.length) return;
+
+  const max = Math.max(...data, 1);
+  const min = Math.min(...data, 0);
+  const range = (max - min) || 1;
+  const stepX = (W - PAD * 2) / (data.length - 1 || 1);
+  const points = data.map((v, i) => ({
+    x: PAD + i * stepX,
+    y: H - PAD - ((v - min) / range) * (H - PAD * 2),
+  }));
+
+  // Smooth through the real points with cubic bezier segments (Catmull-Rom
+  // style) — this is interpolation for visual continuity, not fabricated
+  // data; every anchor point is still the real value for that day.
+  function smoothPath(pts){
+    if (pts.length < 2) return `M${pts[0].x},${pts[0].y}`;
+    let d = `M${pts[0].x},${pts[0].y}`;
+    for (let i = 0; i < pts.length - 1; i++){
+      const p0 = pts[i === 0 ? 0 : i - 1], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+      const c1x = p1.x + (p2.x - p0.x) / 6, c1y = p1.y + (p2.y - p0.y) / 6;
+      const c2x = p2.x - (p3.x - p1.x) / 6, c2y = p2.y - (p3.y - p1.y) / 6;
+      d += ` C${c1x},${c1y} ${c2x},${c2y} ${p2.x},${p2.y}`;
+    }
+    return d;
+  }
+
+  const linePath = smoothPath(points);
+  const fillPath = `${linePath} L${points[points.length-1].x},${H} L${points[0].x},${H} Z`;
+
+  document.getElementById('pulseTrace').setAttribute('d', linePath);
+  document.getElementById('pulseFill').setAttribute('d', fillPath);
+
+  const motion = document.getElementById('pulseDotMotion');
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (prefersReducedMotion) {
+    document.getElementById('pulseDot').style.display = 'none'; // static trace only, no motion
+  } else {
+    motion.setAttribute('path', linePath);
+  }
+})();
+</script>
+{% endblock %}

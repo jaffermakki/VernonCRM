@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+jinja2
+sqlalchemy
+bcrypt
+httpx
+python-multipart
+itsdangerous
+apscheduler
+psycopg2-binary
+cryptography
+sentry-sdk[fastapi]

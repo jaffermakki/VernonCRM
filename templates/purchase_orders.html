@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><div class="eyebrow">Inventory</div><h1>Purchase Orders</h1></div>
+  <div class="quick-actions">
+    <a href="/suppliers" class="btn-secondary" style="padding:9px 16px;border-radius:8px;font-weight:700">🚚 Suppliers</a>
+    <a href="/purchase-orders/new" class="btn-primary" style="padding:9px 16px;border-radius:8px;font-weight:700">+ New PO</a>
+    <a href="/purchase-orders/new?from_reorder=1" class="btn-primary" style="padding:9px 16px;border-radius:8px;font-weight:700">+ From Reorder List</a>
+  </div>
+</div>
+
+<div class="card">
+  <table>
+    <thead><tr><th>PO #</th><th>Supplier</th><th>Status</th><th>Items</th><th>Total Cost</th><th>Created</th></tr></thead>
+    <tbody>
+      {% set status_badge = {'draft':'badge-gray','sent':'badge-blue','received':'badge-green','cancelled':'badge-red'} %}
+      {% for po in pos %}
+      <tr>
+        <td><a href="/purchase-orders/{{ po.id }}">{{ po.number }}</a></td>
+        <td>{{ po.supplier.name if po.supplier else '—' }}</td>
+        <td><span class="badge {{ status_badge.get(po.status,'badge-gray') }}">{{ po.status }}</span></td>
+        <td>{{ po.lines|length }}</td>
+        <td>${{ "%.2f"|format(po_totals.get(po.id, 0)) }}</td>
+        <td class="text-muted">{{ po.created_at.strftime('%b %d, %Y') }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6"><div class="empty-state"><div class="icon">📋</div>No purchase orders yet.</div></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

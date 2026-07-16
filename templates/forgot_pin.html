@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block bare_content %}
+<div class="login-wrap">
+  <div class="login-box" style="width:320px">
+    <div style="font-size:13px;color:var(--text2);margin-bottom:14px">🔑 Account Recovery</div>
+
+    {% if locked %}
+    <div class="error-text">Too many failed attempts. Try again in {{ lock_seconds }}s.</div>
+
+    {% elif not security_configured %}
+    <div class="text-muted" style="font-size:13px;line-height:1.6">
+      Self-service recovery isn't set up for this shop — no security question has been configured yet.
+      If you're locked out, you'll need direct database access to reset a PIN, or restore from a backup.
+    </div>
+
+    {% elif not owners %}
+    <div class="text-muted" style="font-size:13px;line-height:1.6">
+      There's no active Owner account to recover. Contact whoever manages this deployment directly.
+    </div>
+
+    {% else %}
+    <p class="text-muted" style="font-size:12px;margin-bottom:10px">
+      This only recovers <strong>Owner</strong> accounts. If you're a Manager, Technician, or Cashier,
+      ask an Owner to reset your PIN from the Staff page instead.
+    </p>
+
+    {% if error %}<div class="error-text" style="margin-bottom:10px">{{ error }}</div>{% endif %}
+
+    <form method="post" action="/forgot-pin">
+      <div class="form-group"><label>Owner Account</label>
+        <select name="staff_id" required>
+          {% for o in owners %}<option value="{{ o.id }}">{{ o.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="form-group"><label>{{ security_question }}</label>
+        <input name="security_answer" required autofocus>
+      </div>
+      <div class="form-group"><label>New 4-Digit PIN</label>
+        <input name="new_pin" maxlength="4" pattern="\d{4}" required>
+      </div>
+      <div class="form-group"><label>Confirm New PIN</label>
+        <input name="confirm_pin" maxlength="4" pattern="\d{4}" required>
+      </div>
+      <button class="btn-primary" style="width:100%">Reset PIN</button>
+    </form>
+    {% endif %}
+
+    <div style="text-align:center;margin-top:14px">
+      <a href="/login" style="font-size:12px;color:var(--text2)">← Back to login</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head"><div><div class="eyebrow">Purchasing</div><h1>New Purchase Order</h1></div></div>
+
+<form method="post" action="/purchase-orders/add">
+  <div class="card">
+    <div class="form-row">
+      <div class="form-group"><label>Supplier</label>
+        <select name="supplier_id">
+          <option value="">— No supplier selected —</option>
+          {% for s in suppliers %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="form-group"><label>Notes</label><textarea name="notes" rows="2"></textarea></div>
+  </div>
+
+  <div class="card">
+    <h2>Line Items</h2>
+    <div id="po-lines"></div>
+    <button type="button" class="btn-secondary btn-sm" onclick="addLine()">+ Add Line</button>
+    <div class="hint" style="text-align:left;margin-top:8px">Pick a product for each line — quantity and cost pre-fill from the catalog but can be edited.</div>
+  </div>
+
+  <button class="btn-primary">Create Purchase Order</button>
+</form>
+
+<script>
+const PREFILL = {{ prefill|tojson }};
+
+let lineIdx = 0;
+function addLine(productId, qty, cost) {
+  const idx = lineIdx++;
+  const div = document.createElement('div');
+  div.className = 'form-row';
+  div.style.alignItems = 'flex-end';
+  div.innerHTML = `
+    <div class="form-group" style="flex:2"><label>Product</label>
+      <select name="product_id">
+        <option value="">— select —</option>
+        {% for p in all_products %}
+        <option value="{{ p.id }}" data-cost="{{ p.cost }}">{{ p.sku }} — {{ p.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="form-group"><label>Qty</label><input name="qty" type="number" value="${qty || 1}" min="1"></div>
+    <div class="form-group"><label>Unit Cost</label><input name="unit_cost" type="number" step="0.01" value="${cost || 0}"></div>
+    <button type="button" class="btn-secondary btn-sm" onclick="this.parentElement.remove()">Remove</button>
+  `;
+  document.getElementById('po-lines').appendChild(div);
+  const select = div.querySelector('select[name="product_id"]');
+  if (productId) select.value = productId;
+  select.addEventListener('change', () => {
+    const opt = select.selectedOptions[0];
+    const costInput = div.querySelector('input[name="unit_cost"]');
+    if (opt && opt.dataset.cost) costInput.value = opt.dataset.cost;
+  });
+}
+
+if (PREFILL.length) {
+  PREFILL.forEach(p => addLine(p.id, p.qty, p.cost));
+} else {
+  addLine();
+}
+</script>
+{% endblock %}

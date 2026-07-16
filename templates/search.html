@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <div class="eyebrow">Search results</div>
+    <h1>{{ ('"' + q + '"') if q else 'Search' }}</h1>
+  </div>
+</div>
+
+{% if not q %}
+<div class="card"><div class="empty-state"><div class="icon">🔎</div>Type a customer name, phone number, invoice number, or device to search.</div></div>
+{% else %}
+
+<div class="card">
+  <h2>Customers {% if customers %}({{ customers|length }}){% endif %}</h2>
+  {% if customers %}
+  <table>
+    <thead><tr><th>Name</th><th>Phone</th><th>Email</th><th>Spent</th></tr></thead>
+    <tbody>
+      {% for c in customers %}
+      <tr>
+        <td><a href="/customers/{{ c.id }}"><span class="avatar-pill">{{ c.name[:1]|upper }}</span> {{ c.name }}</a></td>
+        <td class="text-muted">{{ c.phone }}</td>
+        <td class="text-muted">{{ c.email }}</td>
+        <td>${{ "%.2f"|format(c.spent) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">No matching customers.</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Invoices {% if invoices %}({{ invoices|length }}){% endif %}</h2>
+  {% if invoices %}
+  <table>
+    <thead><tr><th>#</th><th>Customer</th><th>Total</th><th>Date</th></tr></thead>
+    <tbody>
+      {% for inv in invoices %}
+      <tr>
+        <td><a href="/invoices/{{ inv.id }}">{{ inv.number }}</a></td>
+        <td>{{ inv.customer.name if inv.customer else 'Walk-in' }}</td>
+        <td>${{ "%.2f"|format(inv.total) }}</td>
+        <td class="text-muted">{{ inv.date.strftime('%b %d, %Y') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">No matching invoices.</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Repairs {% if repairs %}({{ repairs|length }}){% endif %}</h2>
+  {% if repairs %}
+  <table>
+    <thead><tr><th>Ticket</th><th>Device</th><th>Issue</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for r in repairs %}
+      <tr>
+        <td><a href="/repairs/{{ r.id }}">#{{ r.ticket_no }}</a></td>
+        <td>{{ r.device }}</td>
+        <td class="text-muted">{{ r.issue }}</td>
+        <td>
+          {% set _b = {'RECEIVED':'gray','DIAGNOSED':'blue','WAITING':'amber','IN_PROGRESS':'blue','READY':'green','COMPLETED':'green','COLLECTED':'gray'} %}
+          <span class="badge badge-{{ _b.get(r.status, 'gray') }}">{{ r.status }}</span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">No matching repairs.</div>
+  {% endif %}
+</div>
+
+{% endif %}
+{% endblock %}

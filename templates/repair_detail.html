@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Ticket #{{ repair.ticket_no }} — {{ repair.device }}</h1>
+{% if flash %}
+<div class="card" style="border-color:{{ 'var(--green)' if flash[0]=='green' else 'var(--red)' }}">{{ flash[1] }}</div>
+{% endif %}
+
+<div class="card">
+  {% for s in status_order %}
+  <span class="pipeline-step {{ 'done' if loop.index0 < cur_idx else 'active' if loop.index0==cur_idx else '' }}">{{ status_labels[s] }}</span>
+  {% endfor %}
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <h2>Details</h2>
+    <div class="total-row"><span>Customer</span><span>{{ repair.customer.name if repair.customer else '—' }} ({{ repair.customer.phone if repair.customer }})</span></div>
+    <div class="total-row"><span>Issue</span><span>{{ repair.issue }}</span></div>
+    <div class="total-row"><span>Description</span><span>{{ repair.description or '—' }}</span></div>
+    <div class="total-row"><span>Technician</span><span>{{ repair.technician.name if repair.technician else 'Unassigned' }}</span></div>
+    <div class="total-row"><span>Promised By</span><span>{{ repair.promised_by or '—' }}</span></div>
+    <div class="total-row"><span>Warranty</span><span>{{ repair.warranty_days }} days</span></div>
+    <div class="total-row"><span>Status</span><span><span class="badge {{ status_badge[repair.status] }}">{{ status_labels[repair.status] }}</span></span></div>
+
+    {% if next_status %}
+    <form method="post" action="/repairs/{{ repair.id }}/advance" style="margin-top:12px">
+      <input name="note" placeholder="Optional note" style="width:100%;margin-bottom:6px">
+      <button class="btn-primary" style="width:100%">→ Move to: {{ status_labels[next_status] }}</button>
+    </form>
+    {% else %}
+    <div class="badge badge-gray" style="margin-top:12px">Terminal status</div>
+    {% endif %}
+
+    {% if repair.status in ['READY', 'COMPLETED'] %}
+    <form method="post" action="/repairs/{{ repair.id }}/charge" style="margin-top:8px">
+      <button class="btn-primary" style="width:100%;background:var(--green);color:#062;font-weight:800">
+        💳 Charge &amp; Collect — ${{ "%.2f"|format(repair.final_cost if repair.final_cost is not none else (repair.estimated_cost or 0)) }}
+      </button>
+    </form>
+    <div class="hint" style="text-align:left;margin-top:2px">Sends this ticket to the register, then marks it Collected once paid.</div>
+    {% endif %}
+
+    {% if repair.status=='READY' %}
+    <form method="post" action="/repairs/{{ repair.id }}/notify" style="margin-top:8px">
+      <button class="btn-secondary" style="width:100%">📱 Send Ready-for-Pickup SMS</button>
+    </form>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Costs</h2>
+    <form method="post" action="/repairs/{{ repair.id }}/cost">
+      <div class="form-group"><label>Estimated Cost</label><input name="estimated_cost" type="number" step="0.01" value="{{ repair.estimated_cost or '' }}"></div>
+      <div class="form-group"><label>Final Cost</label><input name="final_cost" type="number" step="0.01" value="{{ repair.final_cost or '' }}"></div>
+      <button class="btn-secondary">Save Costs</button>
+    </form>
+
+    {% if linked_invoices %}
+    <h2 style="margin-top:16px">Linked Invoices</h2>
+    {% for inv in linked_invoices %}
+    <div class="total-row">
+      <span><a href="/invoices/{{ inv.id }}">{{ inv.number }}</a> <span class="text-muted">{{ inv.date.strftime('%b %d, %Y') }}</span></span>
+      <span>${{ "%.2f"|format(inv.total) }}</span>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if margin is not none %}
+    <h2 style="margin-top:16px">Margin</h2>
+    <div class="total-row"><span>Parts Cost</span><span>${{ "%.2f"|format(parts_cost) }}</span></div>
+    <div class="total-row" style="font-weight:700"><span>Est. Margin</span><span class="{{ 'text-green' if margin >= 0 else 'text-red' }}">${{ "%.2f"|format(margin) }}</span></div>
+    <div class="hint" style="text-align:left">Charge minus parts cost — doesn't include labor time.</div>
+    {% endif %}
+  </div>
+</div>
+
+{% if all_products %}
+<div class="card">
+  <h2>Parts Used</h2>
+  {% if parts %}
+  <table>
+    <thead><tr><th>Part</th><th>Qty</th><th>Unit Cost</th><th>Total</th><th></th></tr></thead>
+    <tbody>
+      {% for p in parts %}
+      <tr>
+        <td>{{ p.name }}</td>
+        <td>{{ p.qty }}</td>
+        <td>${{ "%.2f"|format(p.unit_cost) }}</td>
+        <td>${{ "%.2f"|format(p.qty * p.unit_cost) }}</td>
+        <td>
+          <form method="post" action="/repairs/{{ repair.id }}/parts/{{ p.id }}/remove" onsubmit="return confirm('Remove this part and restore stock?')">
+            <button class="btn-secondary btn-sm">Remove</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state" style="padding:16px"><div class="icon">🔩</div>No parts logged yet.</div>
+  {% endif %}
+  <form method="post" action="/repairs/{{ repair.id }}/parts/add" class="form-row" style="align-items:flex-end;margin-top:10px">
+    <div class="form-group" style="flex:2"><label>Product</label>
+      <select name="product_id" required>
+        <option value="">— select a part —</option>
+        {% for p in all_products %}
+        <option value="{{ p.id }}">{{ p.sku }} — {{ p.name }} ({{ p.stock }} in stock)</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="form-group"><label>Qty</label><input name="qty" type="number" value="1" min="1"></div>
+    <button class="btn-primary">+ Add Part</button>
+  </form>
+  <div class="hint" style="text-align:left;margin-top:6px">Adding a part deducts it from stock immediately, same as a POS sale.</div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Status History</h2>
+  {% for h in history %}
+  <div class="total-row">
+    <span><span class="badge {{ status_badge[h.status] }}">{{ status_labels[h.status] }}</span> {{ h.note }}</span>
+    <span class="text-muted">{{ h.date[:16] }}</span>
+  </div>
+  {% endfor %}
+</div>
+<a href="/repairs">&larr; Back to repairs</a>
+{% endblock %}

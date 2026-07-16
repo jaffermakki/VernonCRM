@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#171a23">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TechPro+">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="icon" href="/static/icon-192.png">
+<title>{% block title %}TechPro+ CRM{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+{% if staff %}
+<div class="layout">
+  <div class="drawer-backdrop" id="drawerBackdrop" onclick="toggleDrawer(false)"></div>
+
+  <div class="topbar">
+    <button class="hamburger" onclick="toggleDrawer(true)" aria-label="Open menu">☰</button>
+    <div class="brand">🛠️ TechPro+</div>
+    <div style="width:32px"></div>
+  </div>
+
+  <nav class="sidebar" id="sidebar">
+    <div class="brand">🛠️ TechPro+ CRM</div>
+    <a href="/" class="{{ 'active' if request.url.path=='/' }}">📊 Dashboard</a>
+    <a href="/pos" class="{{ 'active' if request.url.path=='/pos' }}">🛒 Point of Sale</a>
+    <a href="/repairs" class="{{ 'active' if request.url.path.startswith('/repairs') }}">🔧 Repairs</a>
+    <a href="/invoices" class="{{ 'active' if request.url.path.startswith('/invoices') }}">🧾 Invoices</a>
+    <a href="/cashup" class="{{ 'active' if request.url.path=='/cashup' }}">💵 Cash Up</a>
+    <a href="/products" class="{{ 'active' if request.url.path=='/products' }}">📦 Products</a>
+    {% if staff.role in ['owner','manager'] %}
+    <a href="/purchase-orders" class="{{ 'active' if request.url.path.startswith('/purchase-orders') or request.url.path=='/suppliers' }}">🚚 Purchasing</a>
+    {% endif %}
+    <a href="/customers" class="{{ 'active' if request.url.path.startswith('/customers') }}">👤 Customers</a>
+    {% if staff.role in ['owner','manager'] %}
+    <a href="/reports" class="{{ 'active' if request.url.path=='/reports' }}">📈 Reports</a>
+    <a href="/staff" class="{{ 'active' if request.url.path=='/staff' }}">🧑‍🔧 Staff</a>
+    <a href="/audit" class="{{ 'active' if request.url.path=='/audit' }}">📜 Audit Log</a>
+    {% endif %}
+    {% if staff.role=='owner' %}
+    <a href="/settings" class="{{ 'active' if request.url.path=='/settings' }}">⚙️ Settings</a>
+    {% endif %}
+    <div class="sidebar-footer">
+      <div class="staff-pill">{{ staff.name }} <span class="role-badge">{{ staff.role }}</span></div>
+      <a href="/logout" class="logout-link">Log out</a>
+    </div>
+  </nav>
+
+  <main class="content">
+    {% if not request.url.path.startswith('/pos') %}
+    <div class="util-bar">
+      <form action="/search" method="get" class="search-box">
+        <span class="search-icon">🔎</span>
+        <input type="text" name="q" placeholder="Search customers, invoices, repairs…" value="{{ q or '' }}" autocomplete="off">
+      </form>
+      <div class="bell-wrap">
+        <button class="bell" id="bellBtn" onclick="toggleBell()" aria-label="Notifications">
+          🔔<span class="bell-badge" id="bellBadge" style="display:none">0</span>
+        </button>
+        <div class="bell-dropdown" id="bellDropdown">
+          <div class="bell-dropdown-title">Notifications</div>
+          <div id="bellList"><div class="bell-empty">Loading…</div></div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+
+  <nav class="bottom-nav">
+    <a href="/" class="{{ 'active' if request.url.path=='/' }}"><span class="bn-icon">📊</span>Home</a>
+    <a href="/pos" class="{{ 'active' if request.url.path=='/pos' }}"><span class="bn-icon">🛒</span>Sale</a>
+    <a href="/repairs" class="{{ 'active' if request.url.path.startswith('/repairs') }}"><span class="bn-icon">🔧</span>Repairs</a>
+    <a href="/invoices" class="{{ 'active' if request.url.path.startswith('/invoices') }}"><span class="bn-icon">🧾</span>Invoices</a>
+    <a href="#" onclick="toggleDrawer(true);return false;"><span class="bn-icon">☰</span>More</a>
+  </nav>
+</div>
+<script>
+function toggleDrawer(open){
+  document.getElementById('sidebar').classList.toggle('open', open);
+  document.getElementById('drawerBackdrop').classList.toggle('open', open);
+}
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/static/sw.js').catch(()=>{}));
+}
+
+function toggleBell(){
+  document.getElementById('bellDropdown').classList.toggle('open');
+}
+document.addEventListener('click', (e) => {
+  const wrap = document.querySelector('.bell-wrap');
+  if (wrap && !wrap.contains(e.target)) document.getElementById('bellDropdown').classList.remove('open');
+});
+fetch('/api/notifications').then(r => r.json()).then(data => {
+  const list = document.getElementById('bellList');
+  const badge = document.getElementById('bellBadge');
+  if (!list || !badge) return;
+  const notes = data.notifications || [];
+  if (notes.length === 0) {
+    list.innerHTML = '<div class="bell-empty">You\'re all caught up 🎉</div>';
+    return;
+  }
+  badge.style.display = 'flex';
+  badge.textContent = notes.length;
+  list.innerHTML = notes.map(n =>
+    `<a class="bell-item ${n.type}" href="${n.href}"><span>${n.icon}</span><span>${n.message}</span></a>`
+  ).join('');
+}).catch(() => {
+  document.getElementById('bellList').innerHTML = '<div class="bell-empty">Couldn\'t load notifications</div>';
+});
+</script>
+{% else %}
+{% block bare_content %}{% endblock %}
+{% endif %}
+</body>
+</html>

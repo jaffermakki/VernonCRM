@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><div class="eyebrow">Sales History</div><h1>Invoices</h1></div>
+  <div class="quick-actions"><a href="/pos" class="btn-primary" style="padding:9px 16px;border-radius:8px;font-weight:700">🛒 New Sale</a></div>
+</div>
+
+<div class="stat-grid" style="grid-template-columns:repeat(2,1fr)">
+  <div class="stat-card">
+    <span class="stat-icon">💰</span>
+    <div class="stat-label" style="display:flex;align-items:center;gap:6px"><span class="pulse-live-dot"></span>Today's Sales</div>
+    <div class="stat-value text-green">${{ "%.2f"|format(today_total) }}</div>
+  </div>
+  <div class="stat-card">
+    <span class="stat-icon">🧾</span>
+    <div class="stat-label">Today's Invoices</div>
+    <div class="stat-value">{{ today_count }}</div>
+  </div>
+</div>
+
+<div class="card">
+  <input type="text" id="invoice-filter" placeholder="🔎 Filter by invoice #, customer, or payment method…"
+    style="width:100%;margin-bottom:12px;padding:9px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text)"
+    oninput="filterInvoices()">
+  <table id="invoice-table">
+    <thead><tr><th>#</th><th>Customer</th><th>Payment</th><th>Total</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead>
+    <tbody>
+      {% set pay_badge = {'Cash':'badge-green','Credit Card':'badge-blue','Debit':'badge-blue','UPI':'badge-purple','E-Transfer':'badge-purple','Store Credit':'badge-amber','Split':'badge-gray'} %}
+      {% for inv in invoices %}
+      <tr data-search="{{ (inv.number ~ ' ' ~ (inv.customer.name if inv.customer else 'walk-in') ~ ' ' ~ inv.payment_method)|lower }}">
+        <td><a href="/invoices/{{ inv.id }}">{{ inv.number }}</a></td>
+        <td>
+          {% if inv.customer %}<span class="avatar-pill">{{ inv.customer.name[:1]|upper }}</span>{{ inv.customer.name }}{% else %}<span class="text-muted">Walk-in</span>{% endif %}
+        </td>
+        <td><span class="badge {{ pay_badge.get(inv.payment_method,'badge-gray') }}">{{ inv.payment_method }}</span></td>
+        <td>${{ "%.2f"|format(inv.total) }}</td>
+        <td class="text-muted">{{ inv.date.strftime('%b %d, %H:%M') }}</td>
+        <td>{% if inv.refunded %}<span class="badge badge-red">Refunded</span>{% else %}<span class="badge badge-green">Paid</span>{% endif %}</td>
+        <td style="display:flex;gap:4px;flex-wrap:wrap">
+          <a href="/invoices/{{ inv.id }}/thermal" target="_blank" class="btn-secondary btn-sm" title="Print receipt">🖨️</a>
+          {% if inv.customer and inv.customer.email %}
+          <form method="post" action="/invoices/{{ inv.id }}/email">
+            <input type="hidden" name="to_email" value="{{ inv.customer.email }}">
+            <button class="btn-secondary btn-sm" title="Email receipt to {{ inv.customer.email }}">✉️</button>
+          </form>
+          {% endif %}
+          {% if inv.customer and inv.customer.phone %}
+          <form method="post" action="/invoices/{{ inv.id }}/sms">
+            <input type="hidden" name="to_phone" value="{{ inv.customer.phone }}">
+            <button class="btn-secondary btn-sm" title="SMS receipt to {{ inv.customer.phone }}">📱</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7"><div class="empty-state"><div class="icon">🧾</div>No invoices yet — head to Point of Sale to ring one up.</div></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div id="no-results" class="empty-state" style="display:none"><div class="icon">🔎</div>No invoices match that search.</div>
+</div>
+
+<script>
+function filterInvoices(){
+  const q = document.getElementById('invoice-filter').value.toLowerCase().trim();
+  const rows = document.querySelectorAll('#invoice-table tbody tr[data-search]');
+  let visible = 0;
+  rows.forEach(row => {
+    const match = !q || row.dataset.search.includes(q);
+    row.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+  document.getElementById('no-results').style.display = (rows.length && visible === 0) ? 'block' : 'none';
+}
+</script>
+{% endblock %}

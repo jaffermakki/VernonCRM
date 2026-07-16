@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block content %}
+{% set status_badge = {'draft':'badge-gray','sent':'badge-blue','received':'badge-green','cancelled':'badge-red'} %}
+<div class="page-head">
+  <div><div class="eyebrow">Purchase Order</div><h1>{{ po.number }} <span class="badge {{ status_badge.get(po.status,'badge-gray') }}">{{ po.status }}</span></h1></div>
+</div>
+
+{% if flash %}
+<div class="card" style="border-color:{{ 'var(--green)' if flash[0]=='green' else 'var(--red)' }}">{{ flash[1] }}</div>
+{% endif %}
+
+<div class="card">
+  <div class="grid grid-3">
+    <div><div class="text-muted" style="font-size:12px">Supplier</div><div>{{ po.supplier.name if po.supplier else '—' }}</div></div>
+    <div><div class="text-muted" style="font-size:12px">Created by</div><div>{{ po.created_by_name }}, {{ po.created_at.strftime('%b %d, %Y') }}</div></div>
+    <div><div class="text-muted" style="font-size:12px">Total Cost</div><div style="font-weight:700">${{ "%.2f"|format(total_cost) }}</div></div>
+  </div>
+  {% if po.notes %}<div class="text-muted" style="margin-top:10px;font-size:13px">{{ po.notes }}</div>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Line Items</h2>
+  {% if po.status == 'received' %}
+  <table>
+    <thead><tr><th>SKU</th><th>Name</th><th>Ordered</th><th>Received</th><th>Unit Cost</th><th>Line Total</th></tr></thead>
+    <tbody>
+      {% for l in po.lines %}
+      <tr>
+        <td class="text-muted">{{ l.sku }}</td><td>{{ l.name }}</td>
+        <td>{{ l.qty }}</td>
+        <td class="{{ 'text-green' if l.received_qty==l.qty else 'text-red' }}">{{ l.received_qty }}</td>
+        <td>${{ "%.2f"|format(l.unit_cost) }}</td>
+        <td>${{ "%.2f"|format(l.qty * l.unit_cost) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif po.status == 'sent' %}
+  <form method="post" action="/purchase-orders/{{ po.id }}/receive">
+    <table>
+      <thead><tr><th>SKU</th><th>Name</th><th>Ordered</th><th>Unit Cost</th><th>Qty Actually Received</th></tr></thead>
+      <tbody>
+        {% for l in po.lines %}
+        <tr>
+          <td class="text-muted">{{ l.sku }}</td><td>{{ l.name }}</td>
+          <td>{{ l.qty }}</td><td>${{ "%.2f"|format(l.unit_cost) }}</td>
+          <td><input name="received_{{ l.id }}" type="number" value="{{ l.qty }}" min="0" max="{{ l.qty }}" style="width:80px"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="hint" style="text-align:left;margin:8px 0">Defaults to the full ordered quantity — adjust any line that arrived short before confirming.</div>
+    <button class="btn-primary">✓ Confirm Receipt — Add to Stock</button>
+  </form>
+  {% else %}
+  <table>
+    <thead><tr><th>SKU</th><th>Name</th><th>Qty</th><th>Unit Cost</th><th>Line Total</th></tr></thead>
+    <tbody>
+      {% for l in po.lines %}
+      <tr>
+        <td class="text-muted">{{ l.sku }}</td><td>{{ l.name }}</td>
+        <td>{{ l.qty }}</td><td>${{ "%.2f"|format(l.unit_cost) }}</td>
+        <td>${{ "%.2f"|format(l.qty * l.unit_cost) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/purchase-orders/{{ po.id }}/send" style="margin-top:10px">
+    <button class="btn-primary">📤 Mark as Sent to Supplier</button>
+  </form>
+  {% if po.supplier and po.supplier.email %}
+  <div class="hint" style="text-align:left;margin-top:6px">This will also email the order to {{ po.supplier.email }} if email is configured in Settings.</div>
+  {% endif %}
+  {% endif %}
+</div>
+{% endblock %}
