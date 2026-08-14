@@ -8,7 +8,9 @@ from .auth import hash_pin
 _COLUMN_DEFAULTS = {
     "subcategory": "''", "variant_group": "''", "reorder_threshold": "5", "reorder_qty": "10",
     "loyalty_pts_used": "0", "store_credit_used": "0", "tendered": "0", "change_given": "0",
-    "sku": "''", "refunded": "0",
+    "sku": "''", "refunded": "0", "exchange_note": "''", "marketing_consent": "0",
+    "imei": "''", "phone_brand": "''", "phone_model": "''", "color": "''",
+    "cash_amount": "0", "card_amount": "0", "card_reference": "''",
 }
 
 
@@ -75,6 +77,10 @@ def init_db():
             db.add(Setting(key="digest_email", value=""))
         if not db.query(Setting).filter_by(key="digest_hour").first():
             db.add(Setting(key="digest_hour", value="21"))  # 24h, server-local time
+        if not db.query(Setting).filter_by(key="layaway_prefix").first():
+            db.add(Setting(key="layaway_prefix", value="LAY"))
+        if not db.query(Setting).filter_by(key="layaway_counter").first():
+            db.add(Setting(key="layaway_counter", value="1000"))
         if not db.query(Product).first():
             db.add_all([
                 Product(sku="SCRN-IP13", name="iPhone 13 Screen Protector", category="ACCESSORY", subcategory="Screen Protector", price=14.99, cost=3.50, stock=40),

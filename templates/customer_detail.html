@@ -6,39 +6,62 @@
     <h1><span class="avatar-pill" style="width:28px;height:28px;font-size:13px">{{ customer.name[:1]|upper }}</span>{{ customer.name }}</h1>
   </div>
 </div>
+
+{% if flash %}
+<div class="card" style="border-color:{{ 'var(--green)' if flash[0]=='green' else 'var(--red)' }}">{{ flash[1] }}</div>
+{% endif %}
+
 <div class="grid grid-4">
   <div class="card"><div class="stat-label">Total Spent</div><div class="stat-value text-green">${{ "%.2f"|format(customer.spent) }}</div></div>
   <div class="card"><div class="stat-label">Loyalty Points</div><div class="stat-value">{{ customer.points }}</div></div>
   <div class="card"><div class="stat-label">Store Credit</div><div class="stat-value">${{ "%.2f"|format(customer.store_credit) }}</div></div>
-  <div class="card"><div class="stat-label">Phone / Email</div><div style="font-size:13px">{{ customer.phone }}<br>{{ customer.email }}</div></div>
+  <div class="card"><div class="stat-label">Phone</div><div class="stat-value" style="font-size:16px">{{ customer.phone or '—' }}</div></div>
 </div>
 
 <div class="card">
   <h2>Edit Details</h2>
-  <form method="post" action="/customers/{{ customer.id }}/edit" class="form-row" style="align-items:flex-end;flex-wrap:wrap">
+  <form method="post" action="/customers/{{ customer.id }}/edit" class="form-row" style="align-items:flex-end;flex-wrap:wrap"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-group"><label>Name</label><input name="name" value="{{ customer.name }}" required></div>
     <div class="form-group"><label>Phone</label><input name="phone" value="{{ customer.phone }}"></div>
     <div class="form-group"><label>Email</label><input name="email" type="email" value="{{ customer.email }}"></div>
+    <div class="form-group" style="flex-direction:row;align-items:center;gap:8px">
+      <input type="checkbox" name="marketing_consent" id="cd-consent" {{ 'checked' if customer.marketing_consent }} style="width:auto">
+      <label for="cd-consent" style="margin:0">Consents to marketing emails/SMS</label>
+    </div>
     <button class="btn-primary">Save</button>
   </form>
+  <div class="hint" style="text-align:left;margin-top:6px">
+    {% if customer.marketing_consent %}
+    <span class="text-green">✓ Consented{% if customer.consent_date %} on {{ customer.consent_date.strftime('%b %d, %Y') }}{% endif %}</span> — OK to send promotional messages (receipts and repair updates don't need this under CASL).
+    {% else %}
+    <span class="text-muted">Not consented — receipts and repair-ready notifications are still fine to send; promotional messages are not.</span>
+    {% endif %}
+  </div>
 </div>
 
-{% if staff.role in ['owner','manager'] %}
 <div class="card">
-  <h2>Issue Store Credit</h2>
-  <form method="post" action="/customers/{{ customer.id }}/credit" class="form-row" style="align-items:flex-end">
-    <div class="form-group"><label>Amount</label><input name="amount" type="number" step="0.01" min="0" required></div>
-    <button class="btn-primary">Issue Credit</button>
-  </form>
-</div>
-{% endif %}
-
-<div class="card">
-  <h2>Notes</h2>
-  <form method="post" action="/customers/{{ customer.id }}/notes">
-    <textarea name="notes" rows="3" placeholder="Internal notes about this customer…" style="width:100%">{{ customer.notes or '' }}</textarea>
-    <button class="btn-secondary" style="margin-top:8px">Save Notes</button>
-  </form>
+  <h2>Repair History</h2>
+  <table>
+    <thead><tr><th>Ticket</th><th>Device</th><th>Issue</th><th>Status</th><th>Warranty</th></tr></thead>
+    <tbody>
+      {% for r in repairs %}
+      {% set w = repair_warranties.get(r.id) %}
+      <tr>
+        <td><a href="/repairs/{{ r.id }}">#{{ r.ticket_no }}</a></td>
+        <td>{{ r.device }}</td>
+        <td class="text-muted">{{ r.issue }}</td>
+        <td><span class="badge {{ status_badge.get(r.status,'badge-gray') }}">{{ status_labels.get(r.status, r.status) }}</span></td>
+        <td>
+          {% if w and w.active %}<span class="badge badge-green">{{ icon('shield') }} {{ w.days_remaining }}d left</span>
+          {% elif w %}<span class="badge badge-red">Expired</span>
+          {% else %}<span class="text-muted">—</span>{% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="text-muted">No repairs yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
 
 <div class="card">
@@ -59,4 +82,79 @@
     </tbody>
   </table>
 </div>
+
+<div class="card">
+  <h2>Layaways</h2>
+  <table>
+    <thead><tr><th>Number</th><th>Total</th><th>Balance</th><th>Due</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for l in layaways %}
+      <tr>
+        <td><a href="/layaway/{{ l.id }}">{{ l.number }}</a></td>
+        <td>${{ "%.2f"|format(l.total) }}</td>
+        <td>{% if l.status == 'active' %}${{ "%.2f"|format(l.total - l.paid_total) }}{% else %}$0.00{% endif %}</td>
+        <td class="text-muted">{{ l.due_date or '—' }}</td>
+        <td>
+          {% if l.status == 'active' %}<span class="badge badge-amber">Active</span>
+          {% elif l.status == 'completed' %}<span class="badge badge-green">Completed</span>
+          {% elif l.status == 'forfeited' %}<span class="badge badge-red">Forfeited</span>
+          {% else %}<span class="badge">Cancelled</span>{% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="text-muted">No layaways yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Trade-Ins</h2>
+  <table>
+    <thead><tr><th>Device</th><th>Condition</th><th>Amount</th><th>Payout</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for t in trade_ins %}
+      <tr>
+        <td style="font-weight:600">{{ t.device }}{% if t.imei %}<div style="font-weight:400;font-size:10px;color:var(--text-3);margin-top:2px">IMEI: {{ t.imei }}</div>{% endif %}</td>
+        <td class="text-muted">{{ t.condition or '—' }}</td>
+        <td>${{ "%.2f"|format(t.offered_amount) }}</td>
+        <td class="text-muted">{{ t.payout_method.replace('_', ' ')|title }}</td>
+        <td>
+          {% if t.status == 'accepted' %}<span class="badge badge-amber">Accepted</span>
+          {% elif t.status == 'resold' %}<span class="badge badge-green">Resold</span>
+          {% else %}<span class="badge badge-gray">Scrapped</span>{% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="text-muted">No trade-ins yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if customer.phone %}
+<div class="card">
+  <h2>SMS Conversation</h2>
+  <div style="display:flex;flex-direction:column;gap:8px;max-height:340px;overflow-y:auto;margin-bottom:12px;padding:4px">
+    {% for m in sms_thread %}
+    <div style="display:flex;{{ 'justify-content:flex-end' if m.direction=='out' }}">
+      <div style="max-width:75%;padding:8px 12px;border-radius:12px;font-size:13px;
+        {% if m.direction=='out' %}background:var(--accent);color:var(--on-accent);border-bottom-right-radius:3px
+        {% else %}background:var(--surface2);color:var(--text);border-bottom-left-radius:3px{% endif %}">
+        {{ m.body }}
+        <div style="font-size:10px;opacity:.7;margin-top:3px">
+          {% if m.direction=='out' %}{{ m.staff_name }} · {% endif %}{{ m.created_at.strftime('%b %d, %H:%M') }}
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <div class="empty-state" style="padding:16px"><div class="icon">{{ icon('message-circle', size=32) }}</div>No messages yet.</div>
+    {% endfor %}
+  </div>
+  <form method="post" action="/customers/{{ customer.id }}/sms" style="display:flex;gap:8px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="text" name="message" placeholder="Type a reply…" required style="flex:1">
+    <button class="btn-primary">Send</button>
+  </form>
+</div>
+{% endif %}
 {% endblock %}

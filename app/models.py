@@ -24,8 +24,11 @@ class Product(Base):
     sku = Column(String, unique=True, index=True)
     name = Column(String, nullable=False)
     category = Column(String, default="")
-    subcategory = Column(String, default="")  # "Brand" in the UI
+    subcategory = Column(String, default="")  # case manufacturer/"Brand" in the UI (OtterBox, UAG, Generic...) — NOT the phone's brand, see phone_brand below
     variant_group = Column(String, default="")  # e.g. "Clear Silicone Case" — groups model/color variants together for browsing, without changing how stock is tracked per-SKU
+    phone_brand = Column(String, default="")  # the PHONE's brand this variant fits — Apple, Samsung, Google, Motorola... (distinct from subcategory, which is the case's own brand)
+    phone_model = Column(String, default="")  # e.g. "iPhone 15 Pro Max"
+    color = Column(String, default="")
     price = Column(Float, default=0)
     cost = Column(Float, default=0)
     stock = Column(Integer, default=0)
@@ -44,6 +47,14 @@ class Customer(Base):
     store_credit = Column(Float, default=0)
     spent = Column(Float, default=0)
     last_visit = Column(String, default="")
+    # CASL (Canada's Anti-Spam Law): transactional messages — receipts,
+    # repair-ready notifications — don't require this. Anything
+    # promotional (review requests, marketing, newsletters) does, and
+    # should check this flag before sending. Not enforced anywhere yet
+    # since this app doesn't send promotional messages yet — this is the
+    # data-capture groundwork for whenever it does.
+    marketing_consent = Column(Boolean, default=False)
+    consent_date = Column(DateTime, nullable=True)
 
 
 class Repair(Base):
@@ -52,6 +63,7 @@ class Repair(Base):
     ticket_no = Column(Integer, default=1001)
     customer_id = Column(String, ForeignKey("customers.id"), nullable=True)
     device = Column(String, default="")
+    imei = Column(String, default="")  # IMEI/serial of the device being repaired — warranty claims, insurance/police stolen-phone lookups, proof of condition at intake
     issue = Column(String, default="")
     description = Column(Text, default="")
     status = Column(String, default="RECEIVED")
@@ -75,6 +87,9 @@ class Invoice(Base):
     staff_id = Column(String, ForeignKey("staff.id"), nullable=True)
     repair_id = Column(String, ForeignKey("repairs.id"), nullable=True)
     payment_method = Column(String, default="Cash")
+    cash_amount = Column(Float, default=0)     # portion of `total` actually put in the cash drawer
+    card_amount = Column(Float, default=0)     # portion of `total` actually run through the card terminal
+    card_reference = Column(String, default="")  # approval/reference code from the terminal receipt, staff-entered
     subtotal = Column(Float, default=0)
     discount = Column(Float, default=0)
     loyalty_pts_used = Column(Integer, default=0)
@@ -113,6 +128,8 @@ class InvoiceLine(Base):
     sku = Column(String, default="")
     qty = Column(Integer, default=1)
     price = Column(Float, default=0)
+    imei = Column(String, default="")  # IMEI/serial of the specific unit sold — only meaningful for qty=1 serialized devices (phones), left blank for accessories
+    exchange_note = Column(Text, default="")  # e.g. "Exchanged from: Black Case (was $15.00)"
 
     invoice = relationship("Invoice", back_populates="lines")
 
@@ -157,6 +174,23 @@ class CashSession(Base):
     closed_at = Column(DateTime, default=datetime.utcnow)
     closed_by_id = Column(String, nullable=True)
     closed_by_name = Column(String, default="")
+
+
+class SmsMessage(Base):
+    """Logs both directions of SMS — outgoing (receipts, repair-ready
+    notices) and incoming (customer replies via the Twilio webhook).
+    Matched to a customer by phone number since that's all Twilio gives
+    us on an inbound message."""
+    __tablename__ = "sms_messages"
+    id = Column(String, primary_key=True, default=gen_id)
+    customer_id = Column(String, ForeignKey("customers.id"), nullable=True)
+    phone = Column(String, default="")
+    body = Column(Text, default="")
+    direction = Column(String, default="out")  # "out" or "in"
+    staff_name = Column(String, default="")  # who sent it, for outgoing messages
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    customer = relationship("Customer")
 
 
 class Supplier(Base):
@@ -215,3 +249,72 @@ class RepairPart(Base):
     added_at = Column(DateTime, default=datetime.utcnow)
 
     repair = relationship("Repair", backref="parts")
+
+
+class TradeIn(Base):
+    """A used device accepted from a customer in exchange for store
+    credit or cash, toward a new purchase or repair. Deliberately kept
+    separate from Product/Invoice — a trade-in isn't inventory being
+    resold (yet), it's a one-off transaction with its own condition
+    assessment and payout, and most shops either scrap/refurbish
+    trade-ins off-books or list them later as a distinct product."""
+    __tablename__ = "trade_ins"
+    id = Column(String, primary_key=True, default=gen_id)
+    customer_id = Column(String, ForeignKey("customers.id"), nullable=True)
+    device = Column(String, default="")  # e.g. "iPhone 12, 64GB, Blue"
+    imei = Column(String, default="")
+    condition = Column(String, default="")  # e.g. "Good — minor scratches, screen fine"
+    offered_amount = Column(Float, default=0)
+    payout_method = Column(String, default="store_credit")  # store_credit | cash
+    status = Column(String, default="accepted")  # accepted | resold | scrapped
+    notes = Column(Text, default="")
+    staff_id = Column(String, ForeignKey("staff.id"), nullable=True)
+    staff_name = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    customer = relationship("Customer")
+    staff = relationship("Staff")
+
+
+class Layaway(Base):
+    """A held sale paid off in installments. Cart contents are snapshotted
+    as JSON at creation time (same pattern as HeldCart) since the actual
+    products/prices shouldn't drift if a price changes while a customer
+    is still paying it off. Stock is deducted at creation (reserved for
+    this customer) rather than at payoff, so the same item can't be sold
+    twice — see layaway_new() and layaway_cancel() in main.py."""
+    __tablename__ = "layaways"
+    id = Column(String, primary_key=True, default=gen_id)
+    number = Column(String, default="")  # e.g. "LAY-1000"
+    customer_id = Column(String, ForeignKey("customers.id"), nullable=False)
+    cart_json = Column(Text, default="[]")  # snapshot: [{product_id, name, sku, price, qty}]
+    subtotal = Column(Float, default=0)
+    tax_breakdown = Column(Text, default="")  # JSON string of [{label, amount}] — locked in at creation, same as Invoice
+    tax_total = Column(Float, default=0)
+    total = Column(Float, default=0)
+    paid_total = Column(Float, default=0)
+    status = Column(String, default="active")  # active | completed | cancelled | forfeited
+    due_date = Column(String, default="")
+    notes = Column(Text, default="")
+    staff_id = Column(String, ForeignKey("staff.id"), nullable=True)
+    invoice_id = Column(String, ForeignKey("invoices.id"), nullable=True)  # set once completed and converted to a real sale
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    customer = relationship("Customer")
+    staff = relationship("Staff")
+    invoice = relationship("Invoice")
+    payments = relationship("LayawayPayment", back_populates="layaway", cascade="all, delete-orphan", order_by="LayawayPayment.created_at")
+
+
+class LayawayPayment(Base):
+    __tablename__ = "layaway_payments"
+    id = Column(String, primary_key=True, default=gen_id)
+    layaway_id = Column(String, ForeignKey("layaways.id"))
+    amount = Column(Float, default=0)
+    method = Column(String, default="Cash")
+    staff_id = Column(String, ForeignKey("staff.id"), nullable=True)
+    staff_name = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    layaway = relationship("Layaway", back_populates="payments")

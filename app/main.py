@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import os
+import re
 import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,6 +24,10 @@ if _SENTRY_DSN:
         send_default_pii=False,  # don't auto-attach request bodies/cookies — this app handles customer PII
     )
 
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+
 from fastapi import FastAPI, Request, Depends, Form, UploadFile, File, Query
 from fastapi.responses import RedirectResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -34,7 +39,8 @@ from sqlalchemy.exc import IntegrityError
 
 from .database import get_db, SessionLocal
 from .models import (Staff, Product, Customer, Repair, Invoice, InvoiceLine, AuditLog, Setting, HeldCart,
-                      CashSession, Supplier, PurchaseOrder, PurchaseOrderLine, RepairPart)
+                      CashSession, Supplier, PurchaseOrder, PurchaseOrderLine, RepairPart, SmsMessage,
+                      TradeIn, Layaway, LayawayPayment)
 from .auth import (
     hash_pin, verify_pin, is_locked, lock_seconds_remaining,
     register_pin_failure, register_pin_success, attempt_login,
@@ -42,7 +48,42 @@ from .auth import (
 )
 from .tax import calc_canadian_tax, PROVINCE_LABELS
 from .repairs_const import STATUS_LABELS, STATUS_ORDER, STATUS_BADGE, ISSUE_TYPES, next_status
+from .barcode_gen import generate_barcode_svg
+from .icons import icon_svg
+from .csrf import csrf_protect, csrf_token_global, RequestContextMiddleware
+
+
+def get_warranty_status(repair):
+    """Warranty starts when the customer actually collects the device
+    (not when work finishes), since that's when they start using it.
+    Returns None if it hasn't been collected yet — nothing to check
+    warranty against until then. Reads the COLLECTED entry from
+    status_history rather than repair.updated_at, since updated_at can
+    be touched later by unrelated edits (e.g. adjusting the final cost)
+    and would silently corrupt the warranty start date."""
+    if not repair.status_history:
+        return None
+    try:
+        history = json.loads(repair.status_history)
+    except (ValueError, TypeError):
+        return None
+    collected_entries = [h for h in history if h.get("status") == "COLLECTED" and h.get("date")]
+    if not collected_entries:
+        return None
+    try:
+        collected_date = datetime.fromisoformat(collected_entries[0]["date"])
+    except (ValueError, KeyError):
+        return None
+    warranty_days = repair.warranty_days or 0
+    expires = collected_date + timedelta(days=warranty_days)
+    days_remaining = (expires - datetime.utcnow()).days
+    return {
+        "collected_date": collected_date, "expires": expires,
+        "active": days_remaining >= 0, "days_remaining": max(0, days_remaining),
+    }
+
 from .product_const import CATEGORY_LABELS, CAT_SUBCATEGORIES
+from .phone_const import PHONE_BRANDS, PHONE_MODELS, CASE_COLORS, COMMON_CASE_STYLES, LAPTOP_MODELS, CONSOLE_MODELS, COMMON_LAPTOP_GAMING_STYLES
 from .notifications import send_email_receipt, send_sms, send_plain_email
 from .encryption import encrypt_value, decrypt_value
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -87,8 +128,51 @@ app.add_middleware(
     same_site="lax",
     max_age=12 * 60 * 60,
 )
+# Must be added after SessionMiddleware so it runs "inside" it (Starlette
+# middlewares wrap outside-in in the order added, and this needs the
+# session — populated by SessionMiddleware — to already be on the request
+# by the time route handlers/templates read from it).
+app.add_middleware(RequestContextMiddleware)
+
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+templates.env.globals["csrf_token"] = csrf_token_global
+templates.env.globals["icon"] = icon_svg
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Last-resort catch for anything that isn't already handled — a bad
+    query, a None slipping through, anything. Without this, FastAPI's
+    default is a bare, unstyled "Internal Server Error" with no branding,
+    no way back, and (depending on deployment) sometimes a raw traceback —
+    not something a customer-facing till should ever show.
+
+    Deliberately defensive: this must never itself throw, or the fallback
+    for a crash becomes a worse crash. Every step below is wrapped so a
+    failure in logging, in reading the session, or in rendering the error
+    page still ends in *some* response rather than an unhandled 500.
+    """
+    import logging
+    logging.getLogger("uvicorn.error").exception(
+        "Unhandled exception on %s %s", request.method, request.url.path
+    )
+    if _SENTRY_DSN:
+        try:
+            import sentry_sdk
+            sentry_sdk.capture_exception(exc)
+        except Exception:
+            pass  # error reporting failing must never block the response
+
+    try:
+        return templates.TemplateResponse(request, "error_500.html", {}, status_code=500)
+    except Exception:
+        # The template engine itself is having a bad day — fall back to
+        # the simplest possible response rather than let this propagate.
+        return HTMLResponse(
+            "<h1>Something went wrong</h1><p>Please <a href='/'>go back to the dashboard</a>.</p>",
+            status_code=500,
+        )
 
 # WINDOWS FIX: %-d (remove leading zero from day) is Linux-only and
 # crashes on Windows with a ValueError. This custom Jinja filter does
@@ -105,6 +189,15 @@ templates.env.filters["datefmt"] = _datefmt
 init_db()
 
 
+@app.get("/healthz")
+def healthz():
+    """Health check for Railway/Render — deliberately does NOT touch the
+    database or require login, so it stays fast and doesn't false-negative
+    if the DB is briefly reconnecting (e.g. Neon waking from idle)."""
+    return {"status": "ok"}
+
+
+
 # ── helpers ──────────────────────────────────────────────────────────
 def get_setting(db: Session, key: str, default=""):
     s = db.get(Setting, key)
@@ -118,6 +211,33 @@ def set_setting(db: Session, key: str, value: str):
     else:
         db.add(Setting(key=key, value=value))
     db.commit()
+
+
+def _log_outgoing_sms(db: Session, phone: str, body: str, staff_name: str, customer_id: str = None):
+    """Logs a successfully-sent SMS to the conversation thread. Only
+    called after send_sms() reports success, so this represents messages
+    the customer actually received, not failed attempts."""
+    if not customer_id and phone:
+        match = db.query(Customer).filter(Customer.phone == phone).first()
+        customer_id = match.id if match else None
+    db.add(SmsMessage(customer_id=customer_id, phone=phone, body=body, direction="out", staff_name=staff_name))
+    db.commit()
+
+
+def get_sms_webhook_secret(db: Session) -> str:
+    """A random token embedded in the webhook URL Twilio calls when a
+    customer replies. Twilio can't log in with a staff PIN, so this is
+    the access control for that endpoint instead — generated once and
+    reused. NOTE: this is a lighter-weight protection than Twilio's own
+    request-signature validation (HMAC using your Auth Token); it stops
+    randomly-guessed URLs but not a determined attacker who's somehow
+    seen this exact URL. Full X-Twilio-Signature validation would be a
+    further hardening step if that matters for your setup."""
+    secret = get_setting(db, "sms_webhook_secret", "")
+    if not secret:
+        secret = secrets.token_urlsafe(24)
+        set_setting(db, "sms_webhook_secret", secret)
+    return secret
 
 
 def cart_get(request: Request):
@@ -165,6 +285,81 @@ def reset_customer_redemptions(request: Request):
     request.session["store_credit_used"] = 0
 
 
+def pos_cart_context(request: Request, db: Session) -> dict:
+    """Context for the POS cart/payment panel (templates/partials/pos_cart.html)
+    — shared by the full /pos page render and every cart-mutating endpoint's
+    AJAX response, so the panel is always built the same way no matter which
+    route touched it. Deliberately leaner than the full /pos context: it
+    skips the product catalog and category/brand menus, which never change
+    from a cart action and would just be wasted queries on every keystroke.
+    """
+    customers = db.query(Customer).order_by(Customer.name).all()
+    totals = cart_totals(request, db)
+    customer_id = request.session.get("customer_id")
+    selected_customer = db.get(Customer, customer_id) if customer_id else None
+    held_carts = db.query(HeldCart).order_by(HeldCart.created_at.desc()).all()
+    points_redeem_rate = float(get_setting(db, "points_redeem_rate", "100"))
+    return {
+        "customers": customers, "customer_id": customer_id,
+        "selected_customer": selected_customer, "held_carts": held_carts,
+        "points_redeem_rate": points_redeem_rate,
+        "scan_error": request.session.pop("scan_error", None),
+        **totals,
+    }
+
+
+def pos_response(request: Request, db: Session):
+    """The tail call for every cart-mutating POS route. If the till's own
+    fetch() JS made this request (X-Pos-Ajax header), return just the
+    cart-panel HTML fragment so it can be swapped in without a page reload.
+    Otherwise — no JS, a stale tab, curl, a bookmark — fall back to the
+    original full-page redirect, so nothing about this behavior depends on
+    JavaScript being present."""
+    if request.headers.get("X-Pos-Ajax") == "1":
+        return templates.TemplateResponse(request, "partials/pos_cart.html", pos_cart_context(request, db))
+    return RedirectResponse("/pos", status_code=303)
+
+
+def resolve_tender_split(payment_method: str, total: float, cash_part: float, card_part: float) -> tuple:
+    """Decomposes a checkout's payment_method into how much of it actually
+    landed as physical cash in the drawer vs. ran through the card
+    terminal — the two things Cash Up has to reconcile against something
+    real (a physical count, a terminal batch report). UPI, E-Transfer, and
+    Store Credit settle themselves outside both of those, so they
+    contribute to neither.
+
+    A split payment is allowed to add up to more than the total (the
+    checkout route only rejects it if it's short) — e.g. $5 cash + $20
+    card against a $16.94 sale, expecting $8.06 change. The card side is
+    exact (a terminal can't hand back partial change), so any overpayment
+    comes back out of the *cash* side. The net cash this transaction
+    actually leaves in the drawer is what tendered minus what went back
+    out as change — which can go negative for a single transaction (this
+    one nets to -$3.06: the drawer needs $3.06 more than it took in just
+    to make this sale's change), even though the day's total obviously
+    can't.
+    """
+    if payment_method == "Cash":
+        return round(total, 2), 0.0
+    if payment_method.startswith("Split ("):
+        change = max(0.0, round(cash_part + card_part - total, 2))
+        net_cash = round(cash_part - change, 2)
+        return net_cash, round(card_part, 2)
+    if payment_method == "Card":
+        return 0.0, round(total, 2)
+    return 0.0, 0.0  # UPI, E-Transfer, Store Credit — nothing to reconcile physically
+
+
+def payment_method_label(payment_method: str) -> str:
+    """Collapses every distinct 'Split (Cash $x + Card $y)' string down to
+    one label for grouping/display — each split sale otherwise carries its
+    own exact dollar amounts baked into the string, so a raw group-by would
+    produce one row per split sale instead of a single 'Split' bucket."""
+    if payment_method.startswith("Split ("):
+        return "Split (Cash + Card)"
+    return payment_method
+
+
 def next_invoice_number(db: Session):
     prefix = get_setting(db, "invoice_prefix", "INV")
     counter = int(get_setting(db, "invoice_counter", "1000"))
@@ -172,9 +367,96 @@ def next_invoice_number(db: Session):
     return f"{prefix}-{counter}"
 
 
+def next_layaway_number(db: Session):
+    prefix = get_setting(db, "layaway_prefix", "LAY")
+    counter = int(get_setting(db, "layaway_counter", "1000"))
+    set_setting(db, "layaway_counter", str(counter + 1))
+    return f"{prefix}-{counter}"
+
+
 def require_login(request: Request, db: Session):
     staff = get_current_staff(request, db)
     return staff
+
+
+# ── SMS WEBHOOK (incoming replies from Twilio) ──────────────────────────
+# Deliberately outside any require_login check — Twilio calls this
+# directly, not a logged-in staff member. Protected by the secret token
+# in the URL path instead (see get_sms_webhook_secret's docstring for
+# what this does and doesn't protect against).
+@app.post("/webhooks/sms-reply/{secret}")
+async def sms_reply_webhook(request: Request, secret: str, db: Session = Depends(get_db)):
+    expected = get_sms_webhook_secret(db)
+    if secret != expected:
+        return Response(status_code=403)
+
+    form = await request.form()
+    from_phone = form.get("From", "")
+    body = form.get("Body", "")
+    if from_phone and body:
+        customer = db.query(Customer).filter(Customer.phone == from_phone).first()
+        db.add(SmsMessage(customer_id=customer.id if customer else None, phone=from_phone,
+                           body=body, direction="in"))
+        db.commit()
+
+    # Twilio expects a TwiML (XML) response acknowledging receipt. An
+    # empty <Response> means "received, no auto-reply sent" — exactly
+    # what we want, since replies get read by staff, not auto-answered.
+    return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                     media_type="application/xml")
+
+
+# ── PUBLIC REPAIR STATUS LOOKUP ─────────────────────────────────────
+# Deliberately unauthenticated — meant to be shared with a customer
+# (e.g. "check your repair status at [shop]/status") so they don't have
+# to call in. Requires BOTH the exact ticket number AND the last 4
+# digits of the phone number on file to match before showing anything,
+# and even on a match only exposes status-relevant fields (device,
+# status, promised-by date) — never cost, customer name, or any other
+# repair. Wrong/missing ticket and wrong phone digits return the exact
+# same generic error, so this can't be used to enumerate which ticket
+# numbers exist.
+def _phone_last4(phone: str) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    return digits[-4:] if len(digits) >= 4 else digits
+
+
+@app.get("/status", response_class=HTMLResponse)
+def public_repair_status(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(request, "public_status.html", {
+        "result": None, "error": None, "shop_name": get_setting(db, "shop_name", "TechPro+"),
+    })
+
+
+@app.post("/status", response_class=HTMLResponse)
+def public_repair_status_lookup(request: Request, ticket_no: str = Form(...), phone_last4: str = Form(...),
+                                 db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
+    shop_name = get_setting(db, "shop_name", "TechPro+")
+    result, error = None, None
+
+    try:
+        ticket_int = int(re.sub(r"\D", "", ticket_no or ""))
+    except ValueError:
+        ticket_int = None
+
+    digits = re.sub(r"\D", "", phone_last4 or "")
+    repair = db.query(Repair).filter(Repair.ticket_no == ticket_int).first() if ticket_int else None
+
+    if repair and repair.customer and len(digits) == 4 and _phone_last4(repair.customer.phone) == digits:
+        result = {
+            "ticket_no": repair.ticket_no,
+            "device": repair.device,
+            "status": STATUS_LABELS.get(repair.status, repair.status),
+            "status_badge": STATUS_BADGE.get(repair.status, "badge-gray"),
+            "promised_by": repair.promised_by,
+            "ready": repair.status in ("READY", "COMPLETED"),
+        }
+    else:
+        error = "We couldn't find a matching ticket. Double-check your ticket number and the last 4 digits of the phone number on file."
+
+    return templates.TemplateResponse(request, "public_status.html", {
+        "result": result, "error": error, "shop_name": shop_name,
+    })
 
 
 # ── LOGIN ────────────────────────────────────────────────────────────
@@ -189,7 +471,7 @@ def login_page(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/login")
-def login_submit(request: Request, pin: str = Form(...), db: Session = Depends(get_db)):
+def login_submit(request: Request, pin: str = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if is_locked(db):
         request.session["login_error"] = f"Locked. Try again in {lock_seconds_remaining(db)}s."
         return RedirectResponse("/login", status_code=303)
@@ -240,7 +522,7 @@ def forgot_pin_page(request: Request, db: Session = Depends(get_db)):
 @app.post("/forgot-pin")
 def forgot_pin_submit(request: Request, staff_id: str = Form(...), security_answer: str = Form(...),
                        new_pin: str = Form(...), confirm_pin: str = Form(...),
-                       db: Session = Depends(get_db)):
+                       db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if is_locked(db):
         request.session["recovery_error"] = f"Locked. Try again in {lock_seconds_remaining(db)}s."
         return RedirectResponse("/forgot-pin", status_code=303)
@@ -424,7 +706,7 @@ def dashboard(request: Request, db: Session = Depends(get_db), date_range: str =
 
 
 @app.post("/dashboard/dismiss-checklist")
-def dismiss_checklist(request: Request, db: Session = Depends(get_db)):
+def dismiss_checklist(request: Request, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff or not role_allowed(staff, "owner"):
         return RedirectResponse("/", status_code=303)
@@ -461,6 +743,36 @@ def api_notifications(request: Request, db: Session = Depends(get_db)):
             "href": "/repairs",
         })
 
+    recent_replies = db.query(SmsMessage).filter(
+        SmsMessage.direction == "in", SmsMessage.created_at >= datetime.utcnow() - timedelta(hours=24),
+    ).count()
+    if recent_replies:
+        notes.append({
+            "type": "warning", "icon": "💬",
+            "message": f"{recent_replies} SMS repl{'ies' if recent_replies != 1 else 'y'} in the last 24h",
+            "href": "/customers",
+        })
+
+    active_layaways = db.query(Layaway).filter(Layaway.status == "active").all()
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    overdue_layaways = [l for l in active_layaways if l.due_date and l.due_date < today_str]
+    due_soon_layaways = [
+        l for l in active_layaways
+        if l.due_date and today_str <= l.due_date <= (datetime.utcnow() + timedelta(days=3)).strftime("%Y-%m-%d")
+    ]
+    if overdue_layaways:
+        notes.append({
+            "type": "danger", "icon": "📦",
+            "message": f"{len(overdue_layaways)} layaway{'s' if len(overdue_layaways) != 1 else ''} past due date",
+            "href": "/layaway",
+        })
+    elif due_soon_layaways:
+        notes.append({
+            "type": "warning", "icon": "📦",
+            "message": f"{len(due_soon_layaways)} layaway{'s' if len(due_soon_layaways) != 1 else ''} due within 3 days",
+            "href": "/layaway",
+        })
+
     if role_allowed(staff, "owner"):
         last_backup = get_setting(db, "last_backup", "")
         if not last_backup:
@@ -489,10 +801,22 @@ def search(request: Request, db: Session = Depends(get_db), q: str = ""):
             (Customer.name.ilike(like)) | (Customer.phone.ilike(like)) | (Customer.email.ilike(like))
         ).limit(15).all()
         invoices = db.query(Invoice).filter(Invoice.number.ilike(like)).limit(15).all()
-        repair_filters = [Repair.device.ilike(like), Repair.issue.ilike(like)]
+        repair_filters = [Repair.device.ilike(like), Repair.issue.ilike(like), Repair.imei.ilike(like)]
         if q.isdigit():
             repair_filters.append(Repair.ticket_no == int(q))
         repairs = db.query(Repair).filter(or_(*repair_filters)).limit(15).all()
+
+        # An IMEI/serial search should also surface any invoice a device
+        # was actually sold on — not just repair tickets — since that's
+        # the other half of "trace this device's history" (warranty
+        # claims, stolen-phone lookups).
+        if len(q) >= 4:
+            imei_invoice_ids = [row[0] for row in db.query(InvoiceLine.invoice_id)
+                                 .filter(InvoiceLine.imei.ilike(like)).limit(15).all()]
+            if imei_invoice_ids:
+                extra = db.query(Invoice).filter(Invoice.id.in_(imei_invoice_ids)).all()
+                seen = {i.id for i in invoices}
+                invoices += [i for i in extra if i.id not in seen]
 
     return templates.TemplateResponse(request, "search.html", {
         "staff": staff, "q": q,
@@ -510,12 +834,6 @@ def pos_page(request: Request, db: Session = Depends(get_db)):
     if not staff:
         return RedirectResponse("/login", status_code=303)
     products = db.query(Product).all()
-    customers = db.query(Customer).order_by(Customer.name).all()
-    totals = cart_totals(request, db)
-    customer_id = request.session.get("customer_id")
-    selected_customer = db.get(Customer, customer_id) if customer_id else None
-    held_carts = db.query(HeldCart).order_by(HeldCart.created_at.desc()).all()
-    points_redeem_rate = float(get_setting(db, "points_redeem_rate", "100"))
     all_brands = sorted({p.subcategory for p in products if p.subcategory})
     repair_ctx_id = request.session.get("pos_repair_id")
     repair_ctx = db.get(Repair, repair_ctx_id) if repair_ctx_id else None
@@ -523,39 +841,69 @@ def pos_page(request: Request, db: Session = Depends(get_db)):
     variant_group_data = {
         g["name"]: [
             {"pid": v.id, "name": v.name, "sku": v.sku, "price": v.price, "stock": v.stock,
-             "reorder_threshold": v.reorder_threshold, "brand": v.subcategory or ""}
+             "reorder_threshold": v.reorder_threshold, "brand": v.subcategory or "",
+             "phone_brand": v.phone_brand or "", "phone_model": v.phone_model or "", "color": v.color or ""}
             for v in g["variants"]
         ]
         for g in product_groups
     }
+    phone_menu = {}
+    for p in products:
+        if p.phone_brand and p.phone_model:
+            phone_menu.setdefault(p.phone_brand, set()).add(p.phone_model)
+    phone_menu = {brand: sorted(models) for brand, models in phone_menu.items()}
+    all_phone_brands = sorted(phone_menu.keys())
     return templates.TemplateResponse(request, "pos.html", {
         "staff": staff, "products": products,
         "product_groups": product_groups, "ungrouped_products": ungrouped_products,
         "variant_group_data": variant_group_data,
-        "customers": customers, "customer_id": customer_id,
-        "selected_customer": selected_customer, "held_carts": held_carts,
-        "points_redeem_rate": points_redeem_rate,
-        "scan_error": request.session.pop("scan_error", None),
+        "phone_menu": phone_menu, "all_phone_brands": all_phone_brands,
         "category_labels": CATEGORY_LABELS, "all_brands": all_brands,
         "cat_subcategories": CAT_SUBCATEGORIES,
         "repair_ctx": repair_ctx,
-        **totals,
+        **pos_cart_context(request, db),
     })
 
 
 @app.post("/pos/scan")
-def pos_scan(request: Request, sku: str = Form(...), db: Session = Depends(get_db)):
+def pos_scan(request: Request, sku: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
+    """Looks up a scanned/typed SKU and hands it to the same price-check
+    modal a tapped product tile already uses — instead of adding straight
+    to the cart, so staff get one chance to confirm the price or apply an
+    on-the-spot discount before it's in the sale. Every barcode is
+    inherently unambiguous (matches exactly one Product row), so this
+    never needs the variant-picker modal a grouped tile can trigger.
+
+    Only the AJAX (JS-enabled) path behaves this way. A non-AJAX request
+    — JS failed, a stale tab, curl — has no way to show a modal at all,
+    so it falls back to the original direct-add-to-cart behavior, same as
+    every other cart-mutating route's no-JS safety net.
+    """
     if not require_login(request, db):
         return RedirectResponse("/login", status_code=303)
     needle = sku.strip().upper()
+    is_ajax = request.headers.get("X-Pos-Ajax") == "1"
+
     if not needle:
-        return RedirectResponse("/pos", status_code=303)
+        if is_ajax:
+            return {"found": False, "error": ""}
+        return pos_response(request, db)
+
     product = db.query(Product).filter(Product.sku.ilike(needle)).first()
     if not product:
         product = db.query(Product).filter(Product.name.ilike(f"%{needle}%")).first()
+
     if not product:
+        if is_ajax:
+            return {"found": False, "error": f'No product found for "{sku}"'}
         request.session["scan_error"] = f'No product found for "{sku}"'
-        return RedirectResponse("/pos", status_code=303)
+        return pos_response(request, db)
+
+    if is_ajax:
+        return {"found": True, "product": {
+            "pid": product.id, "name": product.name, "sku": product.sku,
+            "price": product.price, "stock": product.stock,
+        }}
 
     cart = cart_get(request)
     for item in cart:
@@ -566,11 +914,11 @@ def pos_scan(request: Request, sku: str = Form(...), db: Session = Depends(get_d
         cart.append({"product_id": product.id, "name": product.name, "sku": product.sku, "price": product.price, "qty": 1})
     request.session["cart"] = cart
     request.session["sub_override"] = None
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/add/{product_id}")
-def pos_add(request: Request, product_id: str, db: Session = Depends(get_db)):
+def pos_add(request: Request, product_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if not require_login(request, db):
         return RedirectResponse("/login", status_code=303)
     product = db.get(Product, product_id)
@@ -584,12 +932,12 @@ def pos_add(request: Request, product_id: str, db: Session = Depends(get_db)):
             cart.append({"product_id": product.id, "name": product.name, "sku": product.sku, "price": product.price, "qty": 1})
         request.session["cart"] = cart
         request.session["sub_override"] = None
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/add-custom")
 def pos_add_custom(request: Request, product_id: str = Form(...),
-                    custom_price: float = Form(...), db: Session = Depends(get_db)):
+                    custom_price: float = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     """Add a product to the cart at a user-specified price instead of the stored price.
     Each custom-price entry is always a separate line item (never merged with other
     entries for the same product, since the price may differ)."""
@@ -607,11 +955,11 @@ def pos_add_custom(request: Request, product_id: str = Form(...),
         })
         request.session["cart"] = cart
         request.session["sub_override"] = None
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/qty/{idx}")
-def pos_qty(request: Request, idx: int, qty: int = Form(...), db: Session = Depends(get_db)):
+def pos_qty(request: Request, idx: int, qty: int = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if not require_login(request, db):
         return RedirectResponse("/login", status_code=303)
     cart = cart_get(request)
@@ -622,11 +970,25 @@ def pos_qty(request: Request, idx: int, qty: int = Form(...), db: Session = Depe
             cart[idx]["qty"] = qty
         request.session["cart"] = cart
         request.session["sub_override"] = None
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
+
+
+@app.post("/pos/imei/{idx}")
+def pos_imei(request: Request, idx: int, imei: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
+    """Attaches an IMEI/serial to a specific cart line before checkout —
+    copied onto the InvoiceLine at checkout time so a sold device's
+    serial is on permanent record against that sale."""
+    if not require_login(request, db):
+        return RedirectResponse("/login", status_code=303)
+    cart = cart_get(request)
+    if 0 <= idx < len(cart):
+        cart[idx]["imei"] = imei.strip()
+        request.session["cart"] = cart
+    return pos_response(request, db)
 
 
 @app.post("/pos/remove/{idx}")
-def pos_remove(request: Request, idx: int, db: Session = Depends(get_db)):
+def pos_remove(request: Request, idx: int, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if not require_login(request, db):
         return RedirectResponse("/login", status_code=303)
     cart = cart_get(request)
@@ -634,11 +996,11 @@ def pos_remove(request: Request, idx: int, db: Session = Depends(get_db)):
         cart.pop(idx)
         request.session["cart"] = cart
         request.session["sub_override"] = None
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/clear")
-def pos_clear(request: Request, db: Session = Depends(get_db)):
+def pos_clear(request: Request, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if not require_login(request, db):
         return RedirectResponse("/login", status_code=303)
     request.session["cart"] = []
@@ -648,37 +1010,37 @@ def pos_clear(request: Request, db: Session = Depends(get_db)):
     request.session["customer_id"] = None
     request.session["pos_repair_id"] = None
     reset_customer_redemptions(request)
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/subtotal")
-def pos_subtotal(request: Request, value: float = Form(...), db: Session = Depends(get_db)):
+def pos_subtotal(request: Request, value: float = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if not require_login(request, db):
         return RedirectResponse("/login", status_code=303)
     request.session["sub_override"] = max(0, value)
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/discount")
-def pos_discount(request: Request, mode: str = Form(...), value: float = Form(0), db: Session = Depends(get_db)):
+def pos_discount(request: Request, mode: str = Form(...), value: float = Form(0), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if not require_login(request, db):
         return RedirectResponse("/login", status_code=303)
     request.session["disc_mode"] = mode if mode in ("$", "%") else "$"
     request.session["disc_value"] = max(0, value)
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/customer")
-def pos_customer(request: Request, customer_id: str = Form(""), db: Session = Depends(get_db)):
+def pos_customer(request: Request, customer_id: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if not require_login(request, db):
         return RedirectResponse("/login", status_code=303)
     request.session["customer_id"] = customer_id or None
     reset_customer_redemptions(request)  # redemptions are tied to whoever was previously attached
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/redeem-points")
-def pos_redeem_points(request: Request, points: int = Form(...), db: Session = Depends(get_db)):
+def pos_redeem_points(request: Request, points: int = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if not require_login(request, db):
         return RedirectResponse("/login", status_code=303)
     customer_id = request.session.get("customer_id")
@@ -690,28 +1052,28 @@ def pos_redeem_points(request: Request, points: int = Form(...), db: Session = D
         if 0 < pts <= (customer.points or 0):
             dollar_value = pts / rate
             request.session["loyalty_discount"] = (request.session.get("loyalty_discount", 0) or 0) + dollar_value
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/redeem-credit")
-def pos_redeem_credit(request: Request, amount: float = Form(...), db: Session = Depends(get_db)):
+def pos_redeem_credit(request: Request, amount: float = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if not require_login(request, db):
         return RedirectResponse("/login", status_code=303)
     customer_id = request.session.get("customer_id")
     customer = db.get(Customer, customer_id) if customer_id else None
     if customer and 0 < amount <= (customer.store_credit or 0):
         request.session["store_credit_used"] = (request.session.get("store_credit_used", 0) or 0) + amount
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/hold")
-def pos_hold(request: Request, name: str = Form(""), db: Session = Depends(get_db)):
+def pos_hold(request: Request, name: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
     cart = cart_get(request)
     if not cart:
-        return RedirectResponse("/pos", status_code=303)
+        return pos_response(request, db)
     held = HeldCart(
         name=name.strip() or f"Hold {datetime.utcnow().strftime('%H:%M:%S')}",
         cart_json=json.dumps(cart),
@@ -729,11 +1091,11 @@ def pos_hold(request: Request, name: str = Form(""), db: Session = Depends(get_d
     request.session["disc_mode"] = "$"
     request.session["customer_id"] = None
     reset_customer_redemptions(request)
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/recall/{held_id}")
-def pos_recall(request: Request, held_id: str, db: Session = Depends(get_db)):
+def pos_recall(request: Request, held_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -748,18 +1110,18 @@ def pos_recall(request: Request, held_id: str, db: Session = Depends(get_db)):
         add_audit(db, staff, "RECALL_CART", f"Cart recalled: {held.name}")
         db.delete(held)
         db.commit()
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/held/{held_id}/delete")
-def pos_held_delete(request: Request, held_id: str, db: Session = Depends(get_db)):
+def pos_held_delete(request: Request, held_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     if not require_login(request, db):
         return RedirectResponse("/login", status_code=303)
     held = db.get(HeldCart, held_id)
     if held:
         db.delete(held)
         db.commit()
-    return RedirectResponse("/pos", status_code=303)
+    return pos_response(request, db)
 
 
 @app.post("/pos/checkout")
@@ -767,7 +1129,8 @@ def pos_checkout(request: Request, payment_method: str = Form("Cash"),
                   tendered: float = Form(0),
                   cash_part: float = Form(0),
                   card_part: float = Form(0),
-                  db: Session = Depends(get_db)):
+                  card_reference: str = Form(""),
+                  db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -804,6 +1167,9 @@ def pos_checkout(request: Request, payment_method: str = Form("Cash"),
     repair_ctx_id = request.session.get("pos_repair_id")
     repair_ctx = db.get(Repair, repair_ctx_id) if repair_ctx_id else None
 
+    cash_amount, card_amount = resolve_tender_split(payment_method, total, cash_part, card_part)
+    card_reference = card_reference.strip()[:64]  # a reasonable cap; this is a receipt code, not free text
+
     # Two checkouts completing at the exact same instant (two terminals, two
     # staff) could theoretically read the same counter value before either
     # writes it back. The database's unique constraint on `number` guarantees
@@ -821,6 +1187,9 @@ def pos_checkout(request: Request, payment_method: str = Form("Cash"),
             staff_id=staff.id,
             repair_id=repair_ctx.id if repair_ctx else None,
             payment_method=payment_method,
+            cash_amount=cash_amount,
+            card_amount=card_amount,
+            card_reference=card_reference,
             subtotal=totals["sub"],
             discount=totals["disc"],
             loyalty_pts_used=loyalty_pts_used,
@@ -845,7 +1214,8 @@ def pos_checkout(request: Request, payment_method: str = Form("Cash"),
 
     for item in cart:
         db.add(InvoiceLine(invoice_id=invoice.id, product_id=item["product_id"],
-                            name=item["name"], sku=item.get("sku", ""), qty=item["qty"], price=item["price"]))
+                            name=item["name"], sku=item.get("sku", ""), qty=item["qty"], price=item["price"],
+                            imei=item.get("imei", "")))
         product = db.get(Product, item["product_id"]) if item["product_id"] else None
         if product:
             product.stock = max(0, product.stock - item["qty"])
@@ -924,14 +1294,18 @@ def invoice_detail(request: Request, invoice_id: str, db: Session = Depends(get_
     if not staff:
         return RedirectResponse("/login", status_code=303)
     invoice = db.get(Invoice, invoice_id)
+    if not invoice:
+        return RedirectResponse("/invoices", status_code=303)
     tax_lines = json.loads(invoice.tax_breakdown) if invoice.tax_breakdown else []
     can_refund = role_allowed(staff, "owner", "manager")
     flash = request.session.pop("flash", None)
     province = get_setting(db, "province", "ON")
+    all_products = db.query(Product).order_by(Product.name).all() if can_refund else []
     return templates.TemplateResponse(request, "invoice_detail.html", {
         "staff": staff, "invoice": invoice, "shop": get_shop_info(db),
         "province_label": PROVINCE_LABELS.get(province, province),
         "tax_lines": tax_lines, "can_refund": can_refund, "flash": flash,
+        "all_products": all_products,
     })
 
 
@@ -949,8 +1323,205 @@ def invoice_thermal(request: Request, invoice_id: str, db: Session = Depends(get
     })
 
 
+# ── LAYAWAY ──────────────────────────────────────────────────────────
+@app.post("/pos/layaway/new")
+def pos_layaway_new(request: Request, deposit: float = Form(0), due_date: str = Form(""),
+                     db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
+    """Converts the current cart into a layaway instead of a straight
+    sale. Stock is deducted immediately (reserved for this customer, so
+    the same item can't be sold to someone else while it's being paid
+    off) — the same way pos_checkout() deducts stock, just without
+    creating an Invoice yet."""
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+
+    cart = cart_get(request)
+    if not cart:
+        return RedirectResponse("/pos", status_code=303)
+
+    customer_id = request.session.get("customer_id")
+    customer = db.get(Customer, customer_id) if customer_id else None
+    if not customer:
+        request.session["scan_error"] = "A layaway needs a customer attached to the sale — select or add one first."
+        return RedirectResponse("/pos", status_code=303)
+
+    totals = cart_totals(request, db)
+    deposit = round(max(0, deposit), 2)
+
+    layaway = Layaway(
+        number=next_layaway_number(db),
+        customer_id=customer.id,
+        cart_json=json.dumps(cart),
+        subtotal=totals["sub"],
+        tax_breakdown=json.dumps(totals["tax"]["lines"]),
+        tax_total=totals["tax"]["tax_total"],
+        total=totals["total"],
+        paid_total=0,
+        due_date=due_date.strip(),
+        staff_id=staff.id,
+    )
+    db.add(layaway)
+    db.flush()
+
+    for item in cart:
+        product = db.get(Product, item["product_id"]) if item.get("product_id") else None
+        if product:
+            product.stock = max(0, product.stock - item["qty"])
+
+    if deposit > 0:
+        db.add(LayawayPayment(layaway_id=layaway.id, amount=deposit, method="Cash", staff_id=staff.id, staff_name=staff.name))
+        layaway.paid_total = deposit
+
+    add_audit(db, staff, "LAYAWAY_CREATE", f"{layaway.number} — {customer.name} — total ${layaway.total:.2f}, deposit ${deposit:.2f}")
+    db.commit()
+
+    request.session["cart"] = []
+    request.session["sub_override"] = None
+    request.session["disc_value"] = 0
+    request.session["disc_mode"] = "$"
+    request.session["customer_id"] = None
+    reset_customer_redemptions(request)
+    return RedirectResponse(f"/layaway/{layaway.id}", status_code=303)
+
+
+@app.get("/layaway", response_class=HTMLResponse)
+def layaway_list(request: Request, db: Session = Depends(get_db)):
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    layaways = db.query(Layaway).order_by(Layaway.created_at.desc()).all()
+    active_total_owed = round(sum(l.total - l.paid_total for l in layaways if l.status == "active"), 2)
+    return templates.TemplateResponse(request, "layaway_list.html", {
+        "staff": staff, "layaways": layaways, "active_total_owed": active_total_owed,
+    })
+
+
+@app.get("/layaway/{layaway_id}", response_class=HTMLResponse)
+def layaway_detail(request: Request, layaway_id: str, db: Session = Depends(get_db)):
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    layaway = db.get(Layaway, layaway_id)
+    if not layaway:
+        return RedirectResponse("/layaway", status_code=303)
+    cart = json.loads(layaway.cart_json or "[]")
+    tax_lines = json.loads(layaway.tax_breakdown or "[]")
+    balance = round(layaway.total - layaway.paid_total, 2)
+    return templates.TemplateResponse(request, "layaway_detail.html", {
+        "staff": staff, "layaway": layaway, "cart": cart, "tax_lines": tax_lines,
+        "balance": max(0, balance), "flash": request.session.pop("flash", None),
+    })
+
+
+@app.post("/layaway/{layaway_id}/payment")
+def layaway_payment(request: Request, layaway_id: str, amount: float = Form(...), method: str = Form("Cash"),
+                     db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    layaway = db.get(Layaway, layaway_id)
+    if not layaway or layaway.status != "active":
+        return RedirectResponse(f"/layaway/{layaway_id}", status_code=303)
+
+    amount = round(amount, 2)
+    if amount <= 0:
+        request.session["flash"] = ("red", "Enter a payment amount greater than $0.")
+        return RedirectResponse(f"/layaway/{layaway_id}", status_code=303)
+
+    db.add(LayawayPayment(layaway_id=layaway.id, amount=amount, method=method, staff_id=staff.id, staff_name=staff.name))
+    layaway.paid_total = round((layaway.paid_total or 0) + amount, 2)
+    layaway.updated_at = datetime.utcnow()
+    add_audit(db, staff, "LAYAWAY_PAYMENT", f"{layaway.number} — ${amount:.2f} via {method}")
+
+    completed_note = ""
+    if layaway.paid_total >= layaway.total - 0.005:
+        # Fully paid off — convert to a real invoice. Stock was already
+        # deducted at creation, so this does NOT touch product.stock again.
+        cart = json.loads(layaway.cart_json or "[]")
+        invoice = None
+        for attempt in range(5):
+            candidate = Invoice(
+                number=next_invoice_number(db),
+                customer_id=layaway.customer_id,
+                staff_id=staff.id,
+                payment_method=f"Layaway ({layaway.number})",
+                # cash_amount/card_amount stay at their column default (0) here
+                # on purpose: this one invoice represents the *whole* layaway,
+                # but the actual cash/card money arrived across however many
+                # separate LayawayPayment installments, each on its own day.
+                # Cash Up counts those individually by their own created_at
+                # date — attributing the full total to today (the payoff day)
+                # would double-count every earlier installment and wreck the
+                # reconciliation on both days.
+                subtotal=layaway.subtotal,
+                discount=0,
+                tendered=layaway.paid_total,
+                change_given=max(0, round(layaway.paid_total - layaway.total, 2)),
+                tax_breakdown=layaway.tax_breakdown,
+                tax_total=layaway.tax_total,
+                total=layaway.total,
+            )
+            db.add(candidate)
+            try:
+                db.flush()
+                invoice = candidate
+                break
+            except IntegrityError:
+                db.rollback()
+                if attempt == 4:
+                    raise
+        for item in cart:
+            db.add(InvoiceLine(invoice_id=invoice.id, product_id=item.get("product_id"),
+                                name=item["name"], sku=item.get("sku", ""), qty=item["qty"], price=item["price"],
+                                imei=item.get("imei", "")))
+        customer = db.get(Customer, layaway.customer_id) if layaway.customer_id else None
+        if customer:
+            points_per_dollar = float(get_setting(db, "points_per_dollar", "1"))
+            customer.points = (customer.points or 0) + int(layaway.total * points_per_dollar)
+            customer.spent = round((customer.spent or 0) + layaway.total, 2)
+            customer.last_visit = datetime.utcnow().isoformat()
+        layaway.status = "completed"
+        layaway.invoice_id = invoice.id
+        add_audit(db, staff, "LAYAWAY_COMPLETE", f"{layaway.number} paid off — converted to Invoice {invoice.number}")
+        completed_note = f" Fully paid — converted to Invoice {invoice.number}."
+
+    db.commit()
+    request.session["flash"] = ("green", f"Payment of ${amount:.2f} recorded.{completed_note}")
+    return RedirectResponse(f"/layaway/{layaway_id}", status_code=303)
+
+
+@app.post("/layaway/{layaway_id}/cancel")
+def layaway_cancel(request: Request, layaway_id: str, outcome: str = Form("cancelled"),
+                    db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
+    """Ends an active layaway without completing the sale. Restocks the
+    reserved items either way — 'cancelled' vs 'forfeited' only changes
+    the record of what happened to the deposit already paid (forfeited =
+    shop keeps it; cancelled = implies it gets refunded to the customer
+    outside this system — refund the cash/store-credit manually)."""
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    if not role_allowed(staff, "owner", "manager"):
+        return HTMLResponse("Forbidden — cancelling a layaway requires manager or owner role.", status_code=403)
+
+    layaway = db.get(Layaway, layaway_id)
+    if layaway and layaway.status == "active":
+        cart = json.loads(layaway.cart_json or "[]")
+        for item in cart:
+            product = db.get(Product, item.get("product_id")) if item.get("product_id") else None
+            if product:
+                product.stock = product.stock + item["qty"]
+        layaway.status = "forfeited" if outcome == "forfeited" else "cancelled"
+        layaway.updated_at = datetime.utcnow()
+        add_audit(db, staff, "LAYAWAY_EDIT", f"{layaway.number} marked {layaway.status} — ${layaway.paid_total:.2f} paid so far, items restocked")
+        db.commit()
+        request.session["flash"] = ("green", f"Layaway {layaway.status}. Items have been restocked.")
+    return RedirectResponse(f"/layaway/{layaway_id}", status_code=303)
+
+
 @app.post("/invoices/{invoice_id}/refund")
-def invoice_refund(request: Request, invoice_id: str, db: Session = Depends(get_db)):
+def invoice_refund(request: Request, invoice_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -973,8 +1544,79 @@ def invoice_refund(request: Request, invoice_id: str, db: Session = Depends(get_
     return RedirectResponse(f"/invoices/{invoice_id}", status_code=303)
 
 
+@app.post("/invoices/{invoice_id}/exchange-line/{line_id}")
+def invoice_exchange_line(request: Request, invoice_id: str, line_id: str,
+                           new_product_id: str = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
+    """Swaps one line item for a different product — the "exchange, not
+    refund" flow shops with a no-refund policy actually need. Restocks
+    the returned item, deducts the replacement from stock, and
+    recalculates the invoice total, since price/tax may differ. Doesn't
+    try to auto-process a second card/cash transaction for any price
+    difference — that's simpler and more reliable handled at the
+    register by the flash message telling staff the exact amount."""
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    if not role_allowed(staff, "owner", "manager"):
+        return HTMLResponse("Forbidden — exchanges require manager or owner role.", status_code=403)
+
+    invoice = db.get(Invoice, invoice_id)
+    if not invoice or invoice.refunded:
+        return RedirectResponse(f"/invoices/{invoice_id}", status_code=303)
+    line = db.get(InvoiceLine, line_id)
+    if not line or line.invoice_id != invoice_id:
+        return RedirectResponse(f"/invoices/{invoice_id}", status_code=303)
+    new_product = db.get(Product, new_product_id)
+    if not new_product:
+        request.session["flash"] = ("red", "That replacement product couldn't be found.")
+        return RedirectResponse(f"/invoices/{invoice_id}", status_code=303)
+    if new_product.stock < line.qty:
+        request.session["flash"] = ("red", f"Only {new_product.stock} of {new_product.name} in stock — need {line.qty}.")
+        return RedirectResponse(f"/invoices/{invoice_id}", status_code=303)
+
+    old_product = db.get(Product, line.product_id) if line.product_id else None
+    if old_product:
+        old_product.stock += line.qty  # returned item goes back on the shelf
+    new_product.stock -= line.qty
+
+    old_name, old_price = line.name, line.price
+    line.exchange_note = (line.exchange_note + " | " if line.exchange_note else "") + \
+        f"Exchanged from: {old_name} (${old_price:.2f}) on {datetime.utcnow().strftime('%b %d, %Y')}"
+    line.product_id = new_product.id
+    line.name = new_product.name
+    line.sku = new_product.sku
+    line.price = new_product.price
+
+    # Recalculate the invoice total from scratch — price/tax may differ
+    # between the old and new item.
+    new_subtotal = round(sum(l.price * l.qty for l in invoice.lines), 2)
+    taxable = max(0, new_subtotal - invoice.discount)
+    province = get_setting(db, "province", "ON")
+    tax = calc_canadian_tax(taxable, province)
+    price_diff = round((new_product.price - old_price) * line.qty, 2)
+    old_total = invoice.total
+    invoice.subtotal = new_subtotal
+    invoice.tax_breakdown = json.dumps(tax["lines"])
+    invoice.tax_total = tax["tax_total"]
+    invoice.total = round(taxable + tax["tax_total"], 2)
+
+    add_audit(db, staff, "EXCHANGE",
+              f"{invoice.number}: exchanged {old_name} for {new_product.name} (${price_diff:+.2f} difference)")
+    db.commit()
+
+    diff_vs_old_total = round(invoice.total - old_total, 2)
+    if diff_vs_old_total > 0:
+        msg = f"Exchange complete. Collect an additional ${diff_vs_old_total:.2f} from the customer."
+    elif diff_vs_old_total < 0:
+        msg = f"Exchange complete. Refund ${abs(diff_vs_old_total):.2f} to the customer (cash, card, or store credit)."
+    else:
+        msg = "Exchange complete. No price difference to collect or refund."
+    request.session["flash"] = ("green", msg)
+    return RedirectResponse(f"/invoices/{invoice_id}", status_code=303)
+
+
 @app.post("/invoices/{invoice_id}/email")
-def invoice_email(request: Request, invoice_id: str, to_email: str = Form(""), db: Session = Depends(get_db)):
+def invoice_email(request: Request, invoice_id: str, to_email: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -986,7 +1628,11 @@ def invoice_email(request: Request, invoice_id: str, to_email: str = Form(""), d
         request.session["flash"] = ("red", "No email address on file for this customer.")
         return RedirectResponse(f"/invoices/{invoice_id}", status_code=303)
 
-    ok, msg = send_email_receipt(db, invoice, recipient, get_setting)
+    ok, msg = send_email_receipt(
+        db, invoice, recipient, get_setting,
+        province_label=PROVINCE_LABELS.get(get_setting(db, "province", "ON"), ""),
+        base_url=str(request.base_url),
+    )
     if ok:
         add_audit(db, staff, "EMAIL_RECEIPT", f"Receipt emailed to {recipient} for invoice {invoice.number}")
     request.session["flash"] = ("green" if ok else "red", msg)
@@ -994,7 +1640,7 @@ def invoice_email(request: Request, invoice_id: str, to_email: str = Form(""), d
 
 
 @app.post("/invoices/{invoice_id}/sms")
-def invoice_sms(request: Request, invoice_id: str, to_phone: str = Form(""), db: Session = Depends(get_db)):
+def invoice_sms(request: Request, invoice_id: str, to_phone: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1012,6 +1658,7 @@ def invoice_sms(request: Request, invoice_id: str, to_phone: str = Form(""), db:
     ok, msg = send_sms(db, recipient, message, get_setting)
     if ok:
         add_audit(db, staff, "SMS_RECEIPT", f"Receipt SMS sent to {recipient} for invoice {invoice.number}")
+        _log_outgoing_sms(db, recipient, message, staff.name, invoice.customer_id)
     request.session["flash"] = ("green" if ok else "red", msg)
     return RedirectResponse(f"/invoices/{invoice_id}", status_code=303)
 
@@ -1032,7 +1679,7 @@ def group_products_by_variant(products):
         if p.variant_group:
             g = groups.setdefault(p.variant_group, {
                 "name": p.variant_group, "variants": [], "total_stock": 0, "low_stock": False,
-                "categories": set(), "brands": set(), "min_price": None, "max_price": None,
+                "categories": set(), "brands": set(), "phone_brands": set(), "min_price": None, "max_price": None,
             })
             g["variants"].append(p)
             g["total_stock"] += p.stock
@@ -1042,6 +1689,8 @@ def group_products_by_variant(products):
                 g["categories"].add(p.category)
             if p.subcategory:
                 g["brands"].add(p.subcategory)
+            if p.phone_brand:
+                g["phone_brands"].add(p.phone_brand)
             g["min_price"] = p.price if g["min_price"] is None else min(g["min_price"], p.price)
             g["max_price"] = p.price if g["max_price"] is None else max(g["max_price"], p.price)
         else:
@@ -1056,24 +1705,40 @@ def products_list(request: Request, db: Session = Depends(get_db)):
         return RedirectResponse("/login", status_code=303)
     products = db.query(Product).order_by(Product.name).all()
     flash = request.session.pop("flash", None)
+    last_generated_group = request.session.pop("last_generated_group", None)
     low_stock_count = sum(1 for p in products if p.stock <= p.reorder_threshold)
     stock_value = round(sum(p.cost * p.stock for p in products), 2) if role_allowed(staff, "owner", "manager") else None
 
-    # Group variants (e.g. "Clear Silicone Case" in 15 model/color combos)
-    # together for browsing, without changing how stock is tracked — each
-    # variant is still its own row with its own SKU and stock underneath.
+    # Group variants (e.g. "iPhone 17 Cases" covering every case type/color
+    # for that one model) together for browsing, without changing how
+    # stock is tracked — each variant is still its own row with its own
+    # SKU and stock underneath.
     product_groups, ungrouped = group_products_by_variant(products)
+
+    # The actual browsing question staff have at the counter is "what do
+    # we carry for THIS phone" — brand and model of the *phone*, not the
+    # case's own maker. Built from phone_brand/phone_model, which only
+    # phone-case products have set at all (chargers/cables/etc. won't
+    # appear in this menu and stay reachable via search instead).
+    phone_menu = {}
+    for p in products:
+        if p.phone_brand and p.phone_model:
+            phone_menu.setdefault(p.phone_brand, set()).add(p.phone_model)
+    phone_menu = {brand: sorted(models) for brand, models in phone_menu.items()}
+    all_phone_brands = sorted(phone_menu.keys())
 
     return templates.TemplateResponse(request, "products.html", {
         "staff": staff, "products": products, "flash": flash,
+        "last_generated_group": last_generated_group,
         "category_labels": CATEGORY_LABELS, "cat_subcategories": CAT_SUBCATEGORIES,
         "low_stock_count": low_stock_count, "stock_value": stock_value,
         "product_groups": product_groups, "ungrouped_products": ungrouped,
+        "phone_menu": phone_menu, "all_phone_brands": all_phone_brands,
     })
 
 
 @app.post("/products/import")
-async def products_import(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def products_import(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1123,7 +1788,7 @@ async def products_import(request: Request, file: UploadFile = File(...), db: Se
 def product_add(request: Request, sku: str = Form(...), name: str = Form(...),
                  category: str = Form(""), subcategory: str = Form(""), variant_group: str = Form(""),
                  price: float = Form(0), cost: float = Form(0), stock: int = Form(0),
-                 reorder_threshold: int = Form(5), reorder_qty: int = Form(10), db: Session = Depends(get_db)):
+                 reorder_threshold: int = Form(5), reorder_qty: int = Form(10), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1135,6 +1800,158 @@ def product_add(request: Request, sku: str = Form(...), name: str = Form(...),
     add_audit(db, staff, "PRODUCT_ADD", f"Added product: {name}")
     db.commit()
     return RedirectResponse("/products", status_code=303)
+
+
+# ── BULK VARIANT GENERATOR ──────────────────────────────────────────
+# The actual pain point this solves: a case style like "Hard Ring Case"
+# needs its own SKU for every phone model x color combination it comes
+# in — that's easily 15 models x 6 colors = 90 near-identical rows to
+# create by hand through the one-at-a-time Add Product form. This lets
+# staff pick the case style once, check off which models and colors it
+# comes in, and generates every SKU in one pass.
+
+_SKU_PART_RE = re.compile(r"[^A-Z0-9]+")
+
+
+def _sku_part(text: str) -> str:
+    """Slugifies free text into an uppercase SKU fragment — 'iPhone 15
+    Pro Max' -> 'IPHONE15PROMAX', 'Rose Gold' -> 'ROSEGOLD'."""
+    return _SKU_PART_RE.sub("", text.upper())
+
+
+@app.get("/products/bulk-variants", response_class=HTMLResponse)
+def bulk_variants_form(request: Request, db: Session = Depends(get_db)):
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    if not role_allowed(staff, "owner", "manager"):
+        return HTMLResponse("Forbidden — bulk-creating products requires manager or owner role.", status_code=403)
+    return templates.TemplateResponse(request, "bulk_variants.html", {
+        "staff": staff, "category_labels": CATEGORY_LABELS, "cat_subcategories": CAT_SUBCATEGORIES,
+        "phone_brands": PHONE_BRANDS, "phone_models": PHONE_MODELS, "case_colors": CASE_COLORS,
+        "common_case_styles": COMMON_CASE_STYLES,
+        "laptop_models": LAPTOP_MODELS, "console_models": CONSOLE_MODELS,
+        "common_laptop_gaming_styles": COMMON_LAPTOP_GAMING_STYLES,
+        "flash": request.session.pop("flash", None),
+    })
+
+
+@app.post("/products/bulk-variants/generate")
+def bulk_variants_generate(
+    request: Request,
+    variant_group: str = Form(...),
+    category: str = Form("CASE"),
+    subcategory: str = Form(""),
+    sku_prefix: str = Form(""),
+    price: float = Form(...),
+    cost: float = Form(0),
+    stock: int = Form(0),
+    reorder_threshold: int = Form(5),
+    reorder_qty: int = Form(10),
+    phone_selections: list = Form([]),  # each entry: "Brand||Model", from checked checkboxes
+    extra_models: str = Form(""),  # freeform textarea, one "Brand: Model" per line — for anything not in the checklist
+    colors: list = Form([]),
+    extra_colors: str = Form(""),  # freeform comma-separated — for shades not in the checklist
+    db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect),
+):
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    if not role_allowed(staff, "owner", "manager"):
+        return HTMLResponse("Forbidden — bulk-creating products requires manager or owner role.", status_code=403)
+
+    variant_group = variant_group.strip()
+
+    phone_pairs = []
+    for entry in phone_selections:
+        if "||" in entry:
+            brand, model = entry.split("||", 1)
+            phone_pairs.append((brand.strip(), model.strip()))
+    for line in extra_models.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            brand, model = line.split(":", 1)
+            phone_pairs.append((brand.strip(), model.strip()))
+        else:
+            phone_pairs.append(("Other", line))
+
+    color_list = [c.strip() for c in colors if c.strip()]
+    color_list += [c.strip() for c in extra_colors.split(",") if c.strip()]
+
+    if not variant_group or not phone_pairs or not color_list:
+        request.session["flash"] = ("red", "Pick a case style, at least one phone model, and at least one color before generating.")
+        return RedirectResponse("/products/bulk-variants", status_code=303)
+
+    prefix = _sku_part(sku_prefix or variant_group)[:14]
+    existing_skus = {p.sku for p in db.query(Product).all() if p.sku}
+
+    created, skipped = 0, 0
+    for brand, model in phone_pairs:
+        for color in color_list:
+            sku = f"{prefix}-{_sku_part(model)[:16]}-{_sku_part(color)[:8]}"
+            if sku in existing_skus:
+                # Extremely similar names (e.g. "iPhone 15" and "iPhone
+                # 15 Pro" slugging to overlapping fragments) can collide
+                # — disambiguate rather than silently dropping a variant.
+                suffix = 2
+                while f"{sku}-{suffix}" in existing_skus:
+                    suffix += 1
+                sku = f"{sku}-{suffix}"
+            name = f"{variant_group} — {model} ({color})"
+            db.add(Product(
+                sku=sku, name=name, category=category, subcategory=subcategory.strip(),
+                variant_group=variant_group, phone_brand=brand, phone_model=model, color=color,
+                price=price, cost=cost, stock=stock,
+                reorder_threshold=reorder_threshold, reorder_qty=reorder_qty,
+            ))
+            existing_skus.add(sku)
+            created += 1
+
+    add_audit(db, staff, "PRODUCT_BULK_ADD",
+              f"Bulk-generated {created} variants of \"{variant_group}\" across {len(phone_pairs)} models x {len(color_list)} colors")
+    db.commit()
+
+    request.session["flash"] = ("green", f'Created {created} new variants of "{variant_group}".')
+    request.session["last_generated_group"] = variant_group
+    return RedirectResponse("/products", status_code=303)
+
+
+# ── BARCODE LABEL PRINTING ──────────────────────────────────────────
+@app.get("/products/labels/print", response_class=HTMLResponse)
+def product_labels_print(request: Request, db: Session = Depends(get_db),
+                          group: str = "", ids: str = "", copies: int = 1):
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+
+    products = []
+    if group:
+        products = db.query(Product).filter(Product.variant_group == group).order_by(Product.name).all()
+    elif ids:
+        id_list = [i.strip() for i in ids.split(",") if i.strip()]
+        # Preserve the order IDs were requested in, rather than whatever
+        # order the DB happens to return them — matters when printing a
+        # hand-picked set of labels one at a time.
+        found = {p.id: p for p in db.query(Product).filter(Product.id.in_(id_list)).all()}
+        products = [found[i] for i in id_list if i in found]
+
+    copies = max(1, min(copies, 50))  # sane ceiling — a fat-fingered "500" shouldn't render 500 barcodes
+
+    # Generate once per unique SKU, not once per copy — with copies=10
+    # on a 20-variant batch that's the difference between 20 and 200
+    # barcode generations for the exact same visual output.
+    barcode_by_sku = {}
+    for p in products:
+        if p.sku not in barcode_by_sku:
+            svg, width_mm = generate_barcode_svg(p.sku)
+            barcode_by_sku[p.sku] = {"svg": svg, "width_mm": width_mm}
+
+    return templates.TemplateResponse(request, "product_labels.html", {
+        "staff": staff, "products": products, "group": group, "ids": ids, "copies": copies,
+        "shop": get_shop_info(db), "barcode_by_sku": barcode_by_sku,
+    })
 
 
 @app.get("/products/reorder", response_class=HTMLResponse)
@@ -1197,7 +2014,7 @@ def suppliers_list(request: Request, db: Session = Depends(get_db)):
 @app.post("/suppliers/add")
 def supplier_add(request: Request, name: str = Form(...), contact_name: str = Form(""),
                   email: str = Form(""), phone: str = Form(""), lead_time_days: int = Form(7),
-                  notes: str = Form(""), db: Session = Depends(get_db)):
+                  notes: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1213,7 +2030,7 @@ def supplier_add(request: Request, name: str = Form(...), contact_name: str = Fo
 @app.post("/suppliers/{supplier_id}/edit")
 def supplier_edit(request: Request, supplier_id: str, name: str = Form(...), contact_name: str = Form(""),
                    email: str = Form(""), phone: str = Form(""), lead_time_days: int = Form(7),
-                   notes: str = Form(""), db: Session = Depends(get_db)):
+                   notes: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1230,7 +2047,7 @@ def supplier_edit(request: Request, supplier_id: str, name: str = Form(...), con
 
 
 @app.post("/suppliers/{supplier_id}/toggle")
-def supplier_toggle(request: Request, supplier_id: str, db: Session = Depends(get_db)):
+def supplier_toggle(request: Request, supplier_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1282,7 +2099,7 @@ def po_new(request: Request, from_reorder: str = "", db: Session = Depends(get_d
 
 @app.post("/purchase-orders/add")
 async def po_add(request: Request, supplier_id: str = Form(""), notes: str = Form(""),
-                  db: Session = Depends(get_db)):
+                  db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1343,7 +2160,7 @@ def po_detail(request: Request, po_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/purchase-orders/{po_id}/send")
-def po_send(request: Request, po_id: str, db: Session = Depends(get_db)):
+def po_send(request: Request, po_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1368,7 +2185,7 @@ def po_send(request: Request, po_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/purchase-orders/{po_id}/receive")
-async def po_receive(request: Request, po_id: str, db: Session = Depends(get_db)):
+async def po_receive(request: Request, po_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1423,7 +2240,7 @@ def product_edit_page(request: Request, product_id: str, db: Session = Depends(g
 def product_edit(request: Request, product_id: str, name: str = Form(...), sku: str = Form(...),
                   category: str = Form(""), subcategory: str = Form(""), variant_group: str = Form(""),
                   price: float = Form(0), cost: float = Form(0), stock: int = Form(0),
-                  reorder_threshold: int = Form(5), reorder_qty: int = Form(10), db: Session = Depends(get_db)):
+                  reorder_threshold: int = Form(5), reorder_qty: int = Form(10), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1441,7 +2258,7 @@ def product_edit(request: Request, product_id: str, name: str = Form(...), sku: 
 
 
 @app.post("/products/{product_id}/delete")
-def product_delete(request: Request, product_id: str, db: Session = Depends(get_db)):
+def product_delete(request: Request, product_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1472,11 +2289,14 @@ def customers_list(request: Request, db: Session = Depends(get_db)):
 
 @app.post("/customers/add")
 def customer_add(request: Request, name: str = Form(...), phone: str = Form(""),
-                  email: str = Form(""), notes: str = Form(""), db: Session = Depends(get_db)):
+                  email: str = Form(""), notes: str = Form(""),
+                  marketing_consent: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
-    db.add(Customer(name=name, phone=phone, email=email, notes=notes))
+    consented = marketing_consent == "on"
+    db.add(Customer(name=name, phone=phone, email=email, notes=notes,
+                     marketing_consent=consented, consent_date=datetime.utcnow() if consented else None))
     add_audit(db, staff, "CUSTOMER_ADD", f"Added customer: {name}")
     db.commit()
     return RedirectResponse("/customers", status_code=303)
@@ -1488,28 +2308,63 @@ def customer_detail(request: Request, customer_id: str, db: Session = Depends(ge
     if not staff:
         return RedirectResponse("/login", status_code=303)
     customer = db.get(Customer, customer_id)
+    if not customer:
+        return RedirectResponse("/customers", status_code=303)
     invoices = db.query(Invoice).filter(Invoice.customer_id == customer_id).order_by(Invoice.date.desc()).all()
+    repairs = db.query(Repair).filter(Repair.customer_id == customer_id).order_by(Repair.created_at.desc()).all()
+    repair_warranties = {r.id: get_warranty_status(r) for r in repairs}
+    sms_thread = db.query(SmsMessage).filter(SmsMessage.customer_id == customer_id).order_by(SmsMessage.created_at).all()
+    trade_ins = db.query(TradeIn).filter(TradeIn.customer_id == customer_id).order_by(TradeIn.created_at.desc()).all()
+    layaways = db.query(Layaway).filter(Layaway.customer_id == customer_id).order_by(Layaway.created_at.desc()).all()
+    flash = request.session.pop("flash", None)
     return templates.TemplateResponse(request, "customer_detail.html", {
         "staff": staff, "customer": customer, "invoices": invoices,
+        "repairs": repairs, "repair_warranties": repair_warranties,
+        "status_labels": STATUS_LABELS, "status_badge": STATUS_BADGE,
+        "sms_thread": sms_thread, "flash": flash,
+        "trade_ins": trade_ins, "layaways": layaways,
     })
+
+
+@app.post("/customers/{customer_id}/sms")
+def customer_send_sms(request: Request, customer_id: str, message: str = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    customer = db.get(Customer, customer_id)
+    if not customer or not customer.phone:
+        request.session["flash"] = ("red", "No phone number on file for this customer.")
+        return RedirectResponse(f"/customers/{customer_id}", status_code=303)
+
+    ok, msg = send_sms(db, customer.phone, message, get_setting)
+    if ok:
+        _log_outgoing_sms(db, customer.phone, message, staff.name, customer.id)
+        add_audit(db, staff, "SMS_SENT", f"SMS sent to {customer.name}")
+    request.session["flash"] = ("green" if ok else "red", msg)
+    return RedirectResponse(f"/customers/{customer_id}", status_code=303)
 
 
 @app.post("/customers/{customer_id}/edit")
 def customer_edit(request: Request, customer_id: str, name: str = Form(...),
-                   phone: str = Form(""), email: str = Form(""), db: Session = Depends(get_db)):
+                   phone: str = Form(""), email: str = Form(""),
+                   marketing_consent: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
     customer = db.get(Customer, customer_id)
     if customer:
         customer.name, customer.phone, customer.email = name, phone, email
+        newly_consented = marketing_consent == "on"
+        if newly_consented and not customer.marketing_consent:
+            customer.consent_date = datetime.utcnow()  # only stamp the date when consent is newly given
+        customer.marketing_consent = newly_consented
         add_audit(db, staff, "CUSTOMER_EDIT", f"Edited customer: {name}")
         db.commit()
     return RedirectResponse(f"/customers/{customer_id}", status_code=303)
 
 
 @app.post("/customers/{customer_id}/notes")
-def customer_notes(request: Request, customer_id: str, notes: str = Form(""), db: Session = Depends(get_db)):
+def customer_notes(request: Request, customer_id: str, notes: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1522,7 +2377,7 @@ def customer_notes(request: Request, customer_id: str, notes: str = Form(""), db
 
 
 @app.post("/customers/{customer_id}/credit")
-def customer_credit(request: Request, customer_id: str, amount: float = Form(...), db: Session = Depends(get_db)):
+def customer_credit(request: Request, customer_id: str, amount: float = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1534,6 +2389,74 @@ def customer_credit(request: Request, customer_id: str, amount: float = Form(...
         add_audit(db, staff, "STORE_CREDIT", f"Issued ${amount:.2f} store credit to {customer.name}")
         db.commit()
     return RedirectResponse(f"/customers/{customer_id}", status_code=303)
+
+
+# ── TRADE-INS ────────────────────────────────────────────────────────
+@app.get("/trade-ins", response_class=HTMLResponse)
+def trade_ins_list(request: Request, db: Session = Depends(get_db)):
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    trade_ins = db.query(TradeIn).order_by(TradeIn.created_at.desc()).all()
+    total_paid_out = round(sum(t.offered_amount for t in trade_ins), 2)
+    customers = db.query(Customer).order_by(Customer.name).all()
+    return templates.TemplateResponse(request, "trade_ins.html", {
+        "staff": staff, "trade_ins": trade_ins, "total_paid_out": total_paid_out,
+        "customers": customers, "flash": request.session.pop("flash", None),
+    })
+
+
+@app.post("/trade-ins/add")
+def trade_in_add(request: Request, customer_id: str = Form(""), new_customer_name: str = Form(""),
+                  new_customer_phone: str = Form(""), device: str = Form(...), imei: str = Form(""),
+                  condition: str = Form(""), offered_amount: float = Form(...),
+                  payout_method: str = Form("store_credit"), notes: str = Form(""),
+                  db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    if not role_allowed(staff, "owner", "manager", "cashier"):
+        return HTMLResponse("Forbidden.", status_code=403)
+
+    customer = db.get(Customer, customer_id) if customer_id else None
+    if not customer and new_customer_name.strip():
+        customer = Customer(name=new_customer_name.strip(), phone=new_customer_phone.strip())
+        db.add(customer)
+        db.flush()
+
+    trade_in = TradeIn(
+        customer_id=customer.id if customer else None,
+        device=device.strip(), imei=imei.strip(), condition=condition.strip(),
+        offered_amount=round(offered_amount, 2), payout_method=payout_method,
+        notes=notes.strip(), staff_id=staff.id, staff_name=staff.name,
+    )
+    db.add(trade_in)
+
+    if customer and payout_method == "store_credit" and offered_amount > 0:
+        customer.store_credit = round((customer.store_credit or 0) + offered_amount, 2)
+        add_audit(db, staff, "STORE_CREDIT", f"Issued ${offered_amount:.2f} store credit for trade-in ({device}) — {customer.name}")
+
+    add_audit(db, staff, "TRADE_IN", f"Accepted trade-in: {device}" + (f" (IMEI {imei.strip()})" if imei.strip() else "") + f" — ${offered_amount:.2f} via {payout_method.replace('_', ' ')}")
+    db.commit()
+
+    if payout_method == "cash":
+        request.session["flash"] = ("green", f"Trade-in recorded. Pay ${offered_amount:.2f} cash out from the till.")
+    else:
+        request.session["flash"] = ("green", f"Trade-in recorded — ${offered_amount:.2f} store credit issued{' to ' + customer.name if customer else ''}.")
+    return RedirectResponse("/trade-ins", status_code=303)
+
+
+@app.post("/trade-ins/{trade_in_id}/status")
+def trade_in_status(request: Request, trade_in_id: str, status: str = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    trade_in = db.get(TradeIn, trade_in_id)
+    if trade_in and status in ("accepted", "resold", "scrapped"):
+        trade_in.status = status
+        add_audit(db, staff, "TRADE_IN_EDIT", f"{trade_in.device} marked {status}")
+        db.commit()
+    return RedirectResponse("/trade-ins", status_code=303)
 
 
 # ── REPAIRS ──────────────────────────────────────────────────────────
@@ -1558,10 +2481,10 @@ def repairs_list(request: Request, view: str = "kanban", db: Session = Depends(g
 
 @app.post("/repairs/add")
 def repair_add(request: Request, phone: str = Form(...), name: str = Form(...),
-                device: str = Form(...), issue: str = Form(...), description: str = Form(""),
+                device: str = Form(...), imei: str = Form(""), issue: str = Form(...), description: str = Form(""),
                 estimated_cost: str = Form(""), warranty_days: int = Form(90),
                 promised_by: str = Form(""), technician_id: str = Form(""),
-                db: Session = Depends(get_db)):
+                db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1579,15 +2502,28 @@ def repair_add(request: Request, phone: str = Form(...), name: str = Form(...),
     history = [{"status": "RECEIVED", "note": "Ticket created", "date": datetime.utcnow().isoformat()}]
 
     repair = Repair(
-        ticket_no=next_ticket, customer_id=customer.id, device=device, issue=issue,
+        ticket_no=next_ticket, customer_id=customer.id, device=device, imei=imei.strip(), issue=issue,
         description=description, status="RECEIVED", estimated_cost=cost_val,
         warranty_days=warranty_days, promised_by=promised_by,
         technician_id=technician_id or None, status_history=json.dumps(history),
     )
     db.add(repair)
-    add_audit(db, staff, "REPAIR_CREATE", f"Ticket #{next_ticket} — {device} ({issue})")
+    add_audit(db, staff, "REPAIR_CREATE", f"Ticket #{next_ticket} — {device} ({issue})" + (f" — IMEI {imei.strip()}" if imei.strip() else ""))
     db.commit()
     return RedirectResponse("/repairs", status_code=303)
+
+
+@app.post("/repairs/{repair_id}/imei")
+def repair_imei(request: Request, repair_id: str, imei: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    repair = db.get(Repair, repair_id)
+    if repair:
+        repair.imei = imei.strip()
+        add_audit(db, staff, "REPAIR_EDIT", f"#{repair.ticket_no} — IMEI/serial set to {imei.strip() or '(cleared)'}")
+        db.commit()
+    return RedirectResponse(f"/repairs/{repair_id}", status_code=303)
 
 
 @app.get("/repairs/{repair_id}", response_class=HTMLResponse)
@@ -1596,6 +2532,8 @@ def repair_detail(request: Request, repair_id: str, db: Session = Depends(get_db
     if not staff:
         return RedirectResponse("/login", status_code=303)
     repair = db.get(Repair, repair_id)
+    if not repair:
+        return RedirectResponse("/repairs", status_code=303)
     history = json.loads(repair.status_history) if repair.status_history else []
     n_status = next_status(repair.status)
     cur_idx = STATUS_ORDER.index(repair.status) if repair.status in STATUS_ORDER else 0
@@ -1610,19 +2548,20 @@ def repair_detail(request: Request, repair_id: str, db: Session = Depends(get_db
         charge = repair.final_cost if repair.final_cost is not None else (repair.estimated_cost or 0)
         margin = round(charge - parts_cost, 2)
     all_products = db.query(Product).order_by(Product.name).all() if role_allowed(staff, "owner", "manager", "technician") else []
+    warranty = get_warranty_status(repair)
 
     return templates.TemplateResponse(request, "repair_detail.html", {
         "staff": staff, "repair": repair, "history": list(reversed(history)),
         "next_status": n_status, "cur_idx": cur_idx,
         "status_labels": STATUS_LABELS, "status_order": STATUS_ORDER, "status_badge": STATUS_BADGE,
-        "technicians": technicians, "flash": flash, "linked_invoices": linked_invoices,
+        "technicians": technicians, "flash": flash, "linked_invoices": linked_invoices, "warranty": warranty,
         "parts": parts, "parts_cost": parts_cost, "margin": margin, "all_products": all_products,
     })
 
 
 @app.post("/repairs/{repair_id}/parts/add")
 def repair_part_add(request: Request, repair_id: str, product_id: str = Form(...),
-                     qty: int = Form(1), db: Session = Depends(get_db)):
+                     qty: int = Form(1), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1649,7 +2588,7 @@ def repair_part_add(request: Request, repair_id: str, product_id: str = Form(...
 
 
 @app.post("/repairs/{repair_id}/parts/{part_id}/remove")
-def repair_part_remove(request: Request, repair_id: str, part_id: str, db: Session = Depends(get_db)):
+def repair_part_remove(request: Request, repair_id: str, part_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1669,7 +2608,7 @@ def repair_part_remove(request: Request, repair_id: str, part_id: str, db: Sessi
 
 
 @app.post("/repairs/{repair_id}/advance")
-def repair_advance(request: Request, repair_id: str, note: str = Form(""), db: Session = Depends(get_db)):
+def repair_advance(request: Request, repair_id: str, note: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1689,7 +2628,7 @@ def repair_advance(request: Request, repair_id: str, note: str = Form(""), db: S
 
 
 @app.post("/repairs/{repair_id}/notify")
-def repair_notify(request: Request, repair_id: str, db: Session = Depends(get_db)):
+def repair_notify(request: Request, repair_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1704,13 +2643,14 @@ def repair_notify(request: Request, repair_id: str, db: Session = Depends(get_db
     ok, msg = send_sms(db, repair.customer.phone, message, get_setting)
     if ok:
         add_audit(db, staff, "REPAIR_NOTIFY", f"Ready-for-pickup SMS sent for ticket #{repair.ticket_no}")
+        _log_outgoing_sms(db, repair.customer.phone, message, staff.name, repair.customer_id)
     request.session["flash"] = ("green" if ok else "red", msg)
     return RedirectResponse(f"/repairs/{repair_id}", status_code=303)
 
 
 @app.post("/repairs/{repair_id}/cost")
 def repair_cost(request: Request, repair_id: str, estimated_cost: str = Form(""),
-                 final_cost: str = Form(""), db: Session = Depends(get_db)):
+                 final_cost: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -1725,7 +2665,7 @@ def repair_cost(request: Request, repair_id: str, estimated_cost: str = Form("")
 
 
 @app.post("/repairs/{repair_id}/charge")
-def repair_charge(request: Request, repair_id: str, db: Session = Depends(get_db)):
+def repair_charge(request: Request, repair_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     """Send a repair ticket to the POS register to collect payment. Clears
     whatever's currently in the cart, adds a single line item for this
     repair (using the final cost if set, otherwise the estimate), attaches
@@ -1775,7 +2715,7 @@ def staff_list(request: Request, db: Session = Depends(get_db)):
 
 @app.post("/staff/add")
 def staff_add(request: Request, name: str = Form(...), pin: str = Form(...),
-              role: str = Form("cashier"), db: Session = Depends(get_db)):
+              role: str = Form("cashier"), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     current = require_login(request, db)
     if not current:
         return RedirectResponse("/login", status_code=303)
@@ -1796,7 +2736,7 @@ def staff_add(request: Request, name: str = Form(...), pin: str = Form(...),
 @app.post("/staff/{staff_id}/edit")
 def staff_edit(request: Request, staff_id: str, name: str = Form(...),
                 role: str = Form(...), new_pin: str = Form(""),
-                security_answer: str = Form(""), db: Session = Depends(get_db)):
+                security_answer: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     current = require_login(request, db)
     if not current:
         return RedirectResponse("/login", status_code=303)
@@ -1834,7 +2774,7 @@ def staff_edit(request: Request, staff_id: str, name: str = Form(...),
 
 
 @app.post("/staff/{staff_id}/toggle")
-def staff_toggle(request: Request, staff_id: str, db: Session = Depends(get_db)):
+def staff_toggle(request: Request, staff_id: str, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     current = require_login(request, db)
     if not current:
         return RedirectResponse("/login", status_code=303)
@@ -1872,29 +2812,45 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
         return HTMLResponse("Forbidden — settings require owner role.", status_code=403)
     settings = {s.key: s.value for s in db.query(Setting).all()}
     flash = request.session.pop("flash", None)
+    webhook_secret = get_sms_webhook_secret(db)
+    sms_webhook_url = f"{str(request.base_url).rstrip('/')}/webhooks/sms-reply/{webhook_secret}"
     return templates.TemplateResponse(request, "settings.html", {
         "staff": staff, "settings": settings, "flash": flash,
         "security_question_set": bool(settings.get("security_answer_hash")),
+        "sms_webhook_url": sms_webhook_url,
     })
 
 
 @app.post("/settings")
-def settings_save(request: Request, shop_name: str = Form(...), province: str = Form(...),
-                   invoice_prefix: str = Form(...), shop_address: str = Form(""),
+def settings_save(request: Request, shop_name: str = Form(""), province: str = Form(""),
+                   invoice_prefix: str = Form(""), shop_address: str = Form(""),
                    shop_phone: str = Form(""), shop_email: str = Form(""),
                    shop_gst: str = Form(""), shop_pst: str = Form(""),
                    points_per_dollar: float = Form(1), points_redeem_rate: float = Form(100),
+                   email_method: str = Form("smtp"),
                    smtp_host: str = Form(""), smtp_port: str = Form(""), smtp_user: str = Form(""),
                    smtp_password: str = Form(""), smtp_from: str = Form(""),
+                   brevo_api_key: str = Form(""), brevo_from_email: str = Form(""), brevo_from_name: str = Form(""),
                    twilio_sid: str = Form(""), twilio_token: str = Form(""), twilio_from: str = Form(""),
                    digest_enabled: str = Form(""), digest_email: str = Form(""), digest_hour: int = Form(21),
                    security_question: str = Form(""), security_answer: str = Form(""),
-                   db: Session = Depends(get_db)):
+                   db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
     if not role_allowed(staff, "owner"):
         return HTMLResponse("Forbidden", status_code=403)
+
+    # These three are load-bearing (shop name on every receipt/label,
+    # province drives tax calculation on every sale) — rather than
+    # either 422-crashing the whole save on a framework validation
+    # error, or silently persisting a blank shop name, catch it here
+    # and bounce back with a clear message, leaving whatever was
+    # already saved untouched.
+    if not shop_name.strip() or not province.strip() or not invoice_prefix.strip():
+        request.session["flash"] = ("red", "Shop Name, Province, and Invoice Prefix can't be blank — nothing was saved.")
+        return RedirectResponse("/settings", status_code=303)
+
     set_setting(db, "shop_name", shop_name)
     set_setting(db, "province", province)
     set_setting(db, "invoice_prefix", invoice_prefix)
@@ -1905,12 +2861,17 @@ def settings_save(request: Request, shop_name: str = Form(...), province: str = 
     set_setting(db, "shop_pst", shop_pst)
     set_setting(db, "points_per_dollar", str(points_per_dollar))
     set_setting(db, "points_redeem_rate", str(points_redeem_rate))
+    set_setting(db, "email_method", "brevo_api" if email_method == "brevo_api" else "smtp")
     set_setting(db, "smtp_host", smtp_host)
     set_setting(db, "smtp_port", smtp_port)
     set_setting(db, "smtp_user", smtp_user)
     if smtp_password:  # only overwrite if a new one was actually typed
         set_setting(db, "smtp_password", encrypt_value(smtp_password))
     set_setting(db, "smtp_from", smtp_from)
+    if brevo_api_key:  # only overwrite if a new one was actually typed
+        set_setting(db, "brevo_api_key", encrypt_value(brevo_api_key))
+    set_setting(db, "brevo_from_email", brevo_from_email)
+    set_setting(db, "brevo_from_name", brevo_from_name)
     set_setting(db, "twilio_sid", twilio_sid)
     if twilio_token:
         set_setting(db, "twilio_token", encrypt_value(twilio_token))
@@ -1928,6 +2889,57 @@ def settings_save(request: Request, shop_name: str = Form(...), province: str = 
 
 
 # ── CASH SESSIONS ────────────────────────────────────────────────────
+def todays_cash_card_totals(db: Session, today_str: str) -> dict:
+    """The numbers Cash Up reconciles against physical reality: how much
+    cash should be sitting in the drawer, and how much should show up on
+    the card terminal's own batch report, for everything settled today.
+
+    Two sources feed this, both filtered to today's date:
+      - Invoice.cash_amount / card_amount — set at POS checkout, already
+        split correctly for Cash/Card/Split sales (UPI, E-Transfer, and
+        Store Credit contribute 0 to both, since none of those touch the
+        drawer or the terminal).
+      - LayawayPayment rows — each individual deposit/installment, on the
+        day it was actually collected. The one big invoice created when a
+        layaway is finally paid off is deliberately excluded here (see the
+        comment at that Invoice(...) call) so an installment paid three
+        weeks ago doesn't get counted again on payoff day.
+
+    Used by both /cashup (to display today's running totals) and
+    /cashup/close (to compute what a shift should have in the drawer) —
+    previously each route had its own copy of this logic, string-matching
+    payment_method values ("Credit Card", "Debit") that POS never actually
+    wrote (it writes "Card"), so card reconciliation had never once
+    matched anything.
+    """
+    today_invoices = [i for i in db.query(Invoice).all()
+                       if i.date.strftime("%Y-%m-%d") == today_str and not i.refunded]
+    cash_sales = sum(i.cash_amount for i in today_invoices)
+    card_sales = sum(i.card_amount for i in today_invoices)
+    etransfer_sales = sum(i.total for i in today_invoices if i.payment_method == "E-Transfer")
+    total_sales = sum(i.total for i in today_invoices)
+
+    today_layaway_payments = [p for p in db.query(LayawayPayment).all()
+                               if p.created_at.strftime("%Y-%m-%d") == today_str]
+    for p in today_layaway_payments:
+        if p.method == "Cash":
+            cash_sales += p.amount
+        elif p.method in ("Debit", "Credit"):
+            card_sales += p.amount
+        # E-Transfer layaway installments settle themselves, same as a
+        # regular E-Transfer sale — nothing to reconcile physically.
+
+    card_invoices_today = [i for i in today_invoices if i.card_amount > 0]
+    card_missing_ref = sum(1 for i in card_invoices_today if not i.card_reference)
+
+    return {
+        "cash_sales": round(cash_sales, 2), "card_sales": round(card_sales, 2),
+        "etransfer_sales": round(etransfer_sales, 2), "total_sales": round(total_sales, 2),
+        "invoice_count": len(today_invoices),
+        "card_invoices_today": card_invoices_today, "card_missing_ref": card_missing_ref,
+    }
+
+
 @app.get("/cashup", response_class=HTMLResponse)
 def cashup_page(request: Request, db: Session = Depends(get_db)):
     staff = require_login(request, db)
@@ -1935,38 +2947,31 @@ def cashup_page(request: Request, db: Session = Depends(get_db)):
         return RedirectResponse("/login", status_code=303)
 
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
-    today_invoices = [i for i in db.query(Invoice).all()
-                       if i.date.strftime("%Y-%m-%d") == today_str and not i.refunded]
-    cash_sales = sum(i.total for i in today_invoices if i.payment_method == "Cash")
-    card_sales = sum(i.total for i in today_invoices if i.payment_method in ("Credit Card", "Debit"))
-    etransfer_sales = sum(i.total for i in today_invoices if i.payment_method == "E-Transfer")
-    total_sales = sum(i.total for i in today_invoices)
+    totals = todays_cash_card_totals(db, today_str)
 
     cash_float = float(get_setting(db, "cash_float", "200"))
-    expected = round(cash_float + cash_sales, 2)
+    expected = round(cash_float + totals["cash_sales"], 2)
     today_session = db.query(CashSession).filter(CashSession.date == today_str).first()
     history = db.query(CashSession).order_by(CashSession.date.desc()).limit(10).all()
 
     return templates.TemplateResponse(request, "cashup.html", {
-        "staff": staff, "total_sales": round(total_sales, 2), "cash_sales": round(cash_sales, 2),
-        "card_sales": round(card_sales, 2), "etransfer_sales": round(etransfer_sales, 2),
-        "invoice_count": len(today_invoices), "cash_float": cash_float, "expected": expected,
+        "staff": staff, "cash_float": cash_float, "expected": expected,
         "today_session": today_session, "history": history,
+        **totals,
     })
 
 
 @app.post("/cashup/close")
 def cashup_close(request: Request, open_float: float = Form(...), actual: float = Form(...),
-                  card_batch: str = Form(""), notes: str = Form(""), db: Session = Depends(get_db)):
+                  card_batch: str = Form(""), notes: str = Form(""), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
 
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
-    today_invoices = [i for i in db.query(Invoice).all()
-                       if i.date.strftime("%Y-%m-%d") == today_str and not i.refunded]
-    cash_sales = sum(i.total for i in today_invoices if i.payment_method == "Cash")
-    card_sales = sum(i.total for i in today_invoices if i.payment_method in ("Credit Card", "Debit"))
+    totals = todays_cash_card_totals(db, today_str)
+    cash_sales = totals["cash_sales"]
+    card_sales = totals["card_sales"]
     expected = round(open_float + cash_sales, 2)
     diff = round(actual - expected, 2)
 
@@ -2046,17 +3051,19 @@ def build_daily_digest(db: Session) -> tuple[str, str]:
 
 
 @app.post("/settings/send-test-email")
-def send_test_email(request: Request, to_email: str = Form(...), db: Session = Depends(get_db)):
+def send_test_email(request: Request, to_email: str = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
     if not role_allowed(staff, "owner"):
         return HTMLResponse("Forbidden", status_code=403)
     shop_name = get_setting(db, "shop_name", "TechPro+")
+    method = get_setting(db, "email_method", "smtp")
+    method_label = "Brevo's HTTPS API" if method == "brevo_api" else "SMTP"
     ok, msg = send_plain_email(
         db, to_email,
         f"Test email from {shop_name}",
-        f"This is a test email from {shop_name}'s CRM. If you're reading this, SMTP is working correctly.",
+        f"This is a test email from {shop_name}'s CRM. If you're reading this, {method_label} is working correctly.",
         get_setting,
     )
     request.session["flash"] = ("green" if ok else "red", msg)
@@ -2077,7 +3084,7 @@ def smtp_diagnose_page(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/settings/smtp-diagnose", response_class=HTMLResponse)
-def smtp_diagnose_run(request: Request, to_email: str = Form(...), db: Session = Depends(get_db)):
+def smtp_diagnose_run(request: Request, to_email: str = Form(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     """Runs SMTP connection step-by-step and reports exactly which phase
     fails — lets you see the precise error rather than a generic message."""
     staff = require_login(request, db)
@@ -2210,7 +3217,7 @@ def smtp_diagnose_run(request: Request, to_email: str = Form(...), db: Session =
 
 
 @app.post("/settings/send-test-digest")
-def send_test_digest(request: Request, db: Session = Depends(get_db)):
+def send_test_digest(request: Request, db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -2284,7 +3291,8 @@ def reports_page(request: Request, tax_month: str = "", db: Session = Depends(ge
     prod_sales = {}
     staff_perf = {}
     for inv in all_invoices:
-        by_payment[inv.payment_method] = by_payment.get(inv.payment_method, 0) + inv.total
+        pm_label = payment_method_label(inv.payment_method)
+        by_payment[pm_label] = by_payment.get(pm_label, 0) + inv.total
         sname = inv.staff.name if inv.staff else "Unknown"
         sp = staff_perf.setdefault(sname, {"name": sname, "invoice_count": 0, "revenue": 0.0})
         sp["invoice_count"] += 1
@@ -2306,6 +3314,24 @@ def reports_page(request: Request, tax_month: str = "", db: Session = Depends(ge
 
     top_products = sorted(prod_sales.values(), key=lambda p: p["qty"], reverse=True)[:8]
     staff_performance = sorted(staff_perf.values(), key=lambda s: s["revenue"], reverse=True)
+
+    # Sales by day, last 14 days — for the Reports bar chart. Built the
+    # same way the dashboard's sparkline already is (no charting
+    # library — plain data the template turns into SVG bars).
+    daily_totals = {}
+    chart_start = (now - timedelta(days=13)).replace(hour=0, minute=0, second=0, microsecond=0)
+    for inv in all_invoices:
+        if inv.date >= chart_start:
+            day_key = inv.date.strftime("%Y-%m-%d")
+            daily_totals[day_key] = daily_totals.get(day_key, 0) + inv.total
+    sales_by_day = []
+    for i in range(14):
+        day = chart_start + timedelta(days=i)
+        key = day.strftime("%Y-%m-%d")
+        # NOT using %-d here — it's Linux-only and crashes on Windows
+        # (same reason the custom `datefmt` Jinja filter exists elsewhere).
+        sales_by_day.append({"label": f"{day.strftime('%b')} {day.day}",
+                              "total": round(daily_totals.get(key, 0), 2)})
 
     # Repairs closed per technician, this month — completes the staff performance picture
     repairs_this_month = db.query(Repair).filter(
@@ -2338,6 +3364,7 @@ def reports_page(request: Request, tax_month: str = "", db: Session = Depends(ge
         "by_category": sorted(by_category.items(), key=lambda x: x[1], reverse=True),
         "by_payment": sorted(by_payment.items(), key=lambda x: x[1], reverse=True),
         "top_products": top_products, "staff_performance": staff_performance,
+        "sales_by_day": sales_by_day,
         "tech_repairs": sorted(tech_repairs.items(), key=lambda x: x[1], reverse=True),
         "tax_month": tax_month, "tax_summary": sorted(tax_summary.items()),
         "tax_summary_total": tax_summary_total, "available_tax_months": available_tax_months,
@@ -2364,7 +3391,8 @@ def _build_eod_data(db: Session, month_str: str):
         d["subtotal"] += inv.subtotal
         d["tax"] += inv.tax_total
         d["total"] += inv.total
-        d["by_payment"][inv.payment_method] = d["by_payment"].get(inv.payment_method, 0) + inv.total
+        pm_label = payment_method_label(inv.payment_method)
+        d["by_payment"][pm_label] = d["by_payment"].get(pm_label, 0) + inv.total
         d["invoices"].append(inv)
 
     day_list = sorted(days.values(), key=lambda d: d["date"], reverse=True)
@@ -2454,7 +3482,7 @@ def export_backup(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/import/backup")
-async def import_backup(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def import_backup(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db), _csrf: None = Depends(csrf_protect)):
     staff = require_login(request, db)
     if not staff:
         return RedirectResponse("/login", status_code=303)
@@ -2551,6 +3579,134 @@ def export_tax_report_csv(request: Request, db: Session = Depends(get_db)):
     rows = [(i.number, i.date.strftime("%Y-%m-%d"), i.subtotal, i.discount, i.tax_total, i.total)
             for i in db.query(Invoice).filter(Invoice.refunded == False).order_by(Invoice.date).all()]  # noqa: E712
     return _csv_response(rows, ["Invoice", "Date", "Subtotal", "Discount", "Tax Collected", "Total"], "tax_report.csv")
+
+
+# Bold, slightly larger header rows for every export sheet — small touch,
+# but a workbook that gets handed to an accountant/bookkeeper reads a lot
+# better with headers that are visually distinct from data rows.
+_XLSX_HEADER_FONT = Font(bold=True)
+
+
+def _autosize_columns(ws, widths):
+    for idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = width
+
+
+def _write_header(ws, headers):
+    ws.append(headers)
+    for cell in ws[ws.max_row]:
+        cell.font = _XLSX_HEADER_FONT
+
+
+@app.get("/export/xlsx/month-end")
+def export_month_end_xlsx(request: Request, month: str = "", db: Session = Depends(get_db)):
+    """Month-end workbook for handing off to a bookkeeper/accountant:
+    every invoice for the selected month with its tax breakdown, a top
+    products sheet, and a tax-summary-by-rate sheet lined up with the
+    same CRA filing-period logic the Reports page already uses. Defaults
+    to the current month; pass ?month=YYYY-MM for any other period."""
+    staff = require_login(request, db)
+    if not staff:
+        return RedirectResponse("/login", status_code=303)
+    if not role_allowed(staff, "owner", "manager"):
+        return HTMLResponse("Forbidden — exports require manager or owner role.", status_code=403)
+
+    now = datetime.utcnow()
+    if not month:
+        month = now.strftime("%Y-%m")
+    try:
+        year, mon = int(month[:4]), int(month[5:7])
+    except (ValueError, IndexError):
+        return HTMLResponse("Invalid month — expected format YYYY-MM.", status_code=400)
+
+    invoices = (
+        db.query(Invoice)
+        .filter(Invoice.date >= datetime(year, mon, 1))
+        .filter(Invoice.date < (datetime(year + 1, 1, 1) if mon == 12 else datetime(year, mon + 1, 1)))
+        .order_by(Invoice.date)
+        .all()
+    )
+
+    wb = Workbook()
+
+    # ── Sheet 1: Invoices ──────────────────────────────────────────
+    ws1 = wb.active
+    ws1.title = "Invoices"
+    _write_header(ws1, ["Invoice #", "Date", "Customer", "Payment Method",
+                         "Subtotal", "Discount", "Tax Detail", "Tax Total", "Total", "Status"])
+    for inv in invoices:
+        try:
+            tax_lines = json.loads(inv.tax_breakdown or "[]")
+            tax_detail = "; ".join(f"{t['label']}: ${t['amount']:.2f}" for t in tax_lines)
+        except (ValueError, KeyError, TypeError):
+            tax_detail = ""
+        ws1.append([
+            inv.number,
+            inv.date.strftime("%Y-%m-%d %H:%M"),
+            inv.customer.name if inv.customer else "Walk-in",
+            inv.payment_method,
+            float(inv.subtotal),
+            float(inv.discount),
+            tax_detail,
+            float(inv.tax_total),
+            float(inv.total),
+            "Refunded" if inv.refunded else "Paid",
+        ])
+    _autosize_columns(ws1, [14, 18, 20, 16, 12, 12, 34, 12, 12, 12])
+    ws1.freeze_panes = "A2"
+
+    # ── Sheet 2: Top Products (by qty sold, this month) ─────────────
+    prod_sales = {}
+    for inv in invoices:
+        if inv.refunded:
+            continue
+        for line in inv.lines:
+            key = line.product_id or line.name
+            entry = prod_sales.setdefault(key, {"name": line.name, "qty": 0, "revenue": 0.0})
+            entry["qty"] += line.qty
+            entry["revenue"] += line.price * line.qty
+    top_products = sorted(prod_sales.values(), key=lambda p: p["qty"], reverse=True)
+
+    ws2 = wb.create_sheet("Top Products")
+    _write_header(ws2, ["Product", "Qty Sold", "Revenue"])
+    for p in top_products:
+        ws2.append([p["name"], p["qty"], round(p["revenue"], 2)])
+    _autosize_columns(ws2, [34, 12, 14])
+    ws2.freeze_panes = "A2"
+
+    # ── Sheet 3: Tax Summary (by rate/label, non-refunded only) ─────
+    tax_summary = {}
+    for inv in invoices:
+        if inv.refunded:
+            continue
+        try:
+            for line in json.loads(inv.tax_breakdown or "[]"):
+                tax_summary[line["label"]] = tax_summary.get(line["label"], 0) + line["amount"]
+        except (ValueError, KeyError, TypeError):
+            continue
+
+    ws3 = wb.create_sheet("Tax Summary")
+    _write_header(ws3, ["Tax", "Amount Collected"])
+    for label, amount in sorted(tax_summary.items()):
+        ws3.append([label, round(amount, 2)])
+    ws3.append(["Total", round(sum(tax_summary.values()), 2)])
+    ws3[ws3.max_row][0].font = _XLSX_HEADER_FONT
+    ws3[ws3.max_row][1].font = _XLSX_HEADER_FONT
+    _autosize_columns(ws3, [24, 18])
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+
+    add_audit(db, staff, "EXPORT", f"Month-end workbook exported for {month}")
+    db.commit()
+
+    filename = f"month_end_{month}.xlsx"
+    return Response(
+        content=out.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── AUDIT LOG ────────────────────────────────────────────────────────

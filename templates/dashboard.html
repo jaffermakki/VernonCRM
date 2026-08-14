@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
 {% if backup_warning %}
-<div class="card" style="border-color:#fbbf24;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-  <span>💾 {{ backup_warning }} Export a backup to keep your data safe.</span>
+<div class="card" style="border-color:var(--warn);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+  <span>{{ icon('save') }} {{ backup_warning }} Export a backup to keep your data safe.</span>
   <a href="/export/backup" class="btn-secondary btn-sm">Export Now</a>
 </div>
 {% endif %}
@@ -11,7 +11,7 @@
 <div class="card checklist-card">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
     <h2 style="margin:0">Get your shop set up <span class="text-muted" style="font-weight:400">({{ checklist.done_count }}/{{ checklist.total }})</span></h2>
-    <form method="post" action="/dashboard/dismiss-checklist"><button type="submit" class="btn-secondary btn-sm">Dismiss</button></form>
+    <form method="post" action="/dashboard/dismiss-checklist"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button type="submit" class="btn-secondary btn-sm">Dismiss</button></form>
   </div>
   <div class="checklist-progress"><div class="checklist-progress-bar" style="width:{{ (checklist.done_count / checklist.total * 100)|round|int }}%"></div></div>
   <div class="checklist-items">
@@ -31,8 +31,8 @@
     <h1>{{ shop_name }}</h1>
   </div>
   <div class="quick-actions">
-    <a href="/pos" class="btn-primary" style="padding:9px 16px;border-radius:8px;font-weight:700">🛒 New Sale</a>
-    <a href="/repairs" class="btn-secondary" style="padding:9px 16px;border-radius:8px;font-weight:700">🔧 New Repair</a>
+    <a href="/pos" class="btn-primary" style="padding:9px 16px;border-radius:8px;font-weight:700">{{ icon('shopping-cart') }} New Sale</a>
+    <a href="/repairs" class="btn-secondary" style="padding:9px 16px;border-radius:8px;font-weight:700">{{ icon('wrench') }} New Repair</a>
   </div>
 </div>
 
@@ -55,13 +55,23 @@
         vs. previous period · {{ count_total }} invoice{{ 's' if count_total != 1 }}
       </div>
     </div>
+    <div class="pulse-readout">
+      <div class="pulse-readout-item">
+        <span class="pulse-readout-label">Peak · {{ trend_days|length }}d</span>
+        <span class="pulse-readout-value" id="pulsePeak">—</span>
+      </div>
+      <div class="pulse-readout-item">
+        <span class="pulse-readout-label">Daily avg · {{ trend_days|length }}d</span>
+        <span class="pulse-readout-value" id="pulseAvg">—</span>
+      </div>
+    </div>
   </div>
   <div class="pulse-scope">
     <svg id="pulseSvg" viewBox="0 0 700 120" preserveAspectRatio="none">
       <defs>
         <linearGradient id="pulseFillGradient" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="#5eead4" stop-opacity="0.35"/>
-          <stop offset="100%" stop-color="#5eead4" stop-opacity="0"/>
+          <stop class="pulse-stop-top" offset="0%"/>
+          <stop class="pulse-stop-bottom" offset="100%"/>
         </linearGradient>
       </defs>
       <line class="pulse-grid-line" x1="0" y1="20" x2="700" y2="20"/>
@@ -91,17 +101,17 @@
       {% else %}
       <div class="stat-trend flat">— flat</div>
       {% endif %}
-      <svg class="sparkline" viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="{{ count_spark }}" fill="none" stroke="#60a5fa" stroke-width="2"/></svg>
+      <svg class="sparkline" viewBox="0 0 100 28" preserveAspectRatio="none"><polyline points="{{ count_spark }}" fill="none" stroke="var(--blue)" stroke-width="2"/></svg>
     </div>
   </div>
   <div class="stat-card">
-    <span class="stat-icon">🔧</span>
+    <span class="stat-icon">{{ icon('wrench') }}</span>
     <div class="stat-label">Open Repairs</div>
     <div class="stat-value {{ 'text-red' if open_repairs_count > 0 else '' }}">{{ open_repairs_count }}</div>
     <div class="stat-trend flat"><a href="/repairs">view board →</a></div>
   </div>
   <div class="stat-card">
-    <span class="stat-icon">📦</span>
+    <span class="stat-icon">{{ icon('package') }}</span>
     <div class="stat-label">Low Stock Items</div>
     <div class="stat-value {{ 'text-red' if low_stock|length > 0 else '' }}">{{ low_stock|length }}</div>
     <div class="stat-trend flat">{% if staff.role in ['owner','manager'] %}<a href="/products/reorder">reorder list →</a>{% else %}low stock items{% endif %}</div>
@@ -128,7 +138,7 @@
           </tr>
           {% else %}
           <tr><td colspan="5">
-            <div class="empty-state"><div class="icon">🧾</div>No sales yet — head to Point of Sale to ring one up.</div>
+            <div class="empty-state"><div class="icon">{{ icon('receipt', size=32) }}</div>No sales yet — head to Point of Sale to ring one up.</div>
           </td></tr>
           {% endfor %}
         </tbody>
@@ -152,7 +162,7 @@
     {% else %}
     <div class="card">
       <h2>Inventory</h2>
-      <div class="empty-state"><div class="icon">✅</div>All stock levels are healthy.</div>
+      <div class="empty-state"><div class="icon">{{ icon('circle-check', size=32) }}</div>All stock levels are healthy.</div>
     </div>
     {% endif %}
 
@@ -169,7 +179,7 @@
           </div>
         </div>
         {% else %}
-        <div class="empty-state"><div class="icon">📜</div>No activity recorded yet.</div>
+        <div class="empty-state"><div class="icon">{{ icon('scroll-text', size=32) }}</div>No activity recorded yet.</div>
         {% endfor %}
       </div>
     </div>
@@ -189,6 +199,14 @@
 
   const max = Math.max(...data, 1);
   const min = Math.min(...data, 0);
+
+  // Scope-style readout: the highest single day and the mean across the
+  // window, both straight off the same real series the trace is drawn from.
+  const money = v => '$' + v.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  const peakEl = document.getElementById('pulsePeak');
+  const avgEl  = document.getElementById('pulseAvg');
+  if (peakEl) peakEl.textContent = money(Math.max(...data, 0));
+  if (avgEl)  avgEl.textContent  = money(data.reduce((a,b)=>a+b,0) / data.length);
   const range = (max - min) || 1;
   const stepX = (W - PAD * 2) / (data.length - 1 || 1);
   const points = data.map((v, i) => ({

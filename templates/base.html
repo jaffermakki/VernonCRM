@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#171a23">
+<meta name="theme-color" content="#0B0D12" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#F3F5F9" media="(prefers-color-scheme: light)">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -12,7 +13,18 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <link rel="icon" href="/static/icon-192.png">
 <title>{% block title %}TechPro+ CRM{% endblock %}</title>
-<link rel="stylesheet" href="/static/style.css">
+<script>
+/* Set the saved theme before first paint so the screen never flashes the
+   wrong one. Falls back to whatever the OS is set to. */
+(function(){
+  try{
+    var t = localStorage.getItem('tp-theme');
+    if(!t) t = 'dark';  // the counter machine lives in dark; light is opt-in
+    document.documentElement.setAttribute('data-theme', t);
+  }catch(e){ document.documentElement.setAttribute('data-theme','dark'); }
+})();
+</script>
+<link rel="stylesheet" href="/static/style.css?v=31">
 </head>
 <body>
 {% if staff %}
@@ -20,33 +32,78 @@
   <div class="drawer-backdrop" id="drawerBackdrop" onclick="toggleDrawer(false)"></div>
 
   <div class="topbar">
-    <button class="hamburger" onclick="toggleDrawer(true)" aria-label="Open menu">☰</button>
-    <div class="brand">🛠️ TechPro+</div>
-    <div style="width:32px"></div>
+    <button class="hamburger" onclick="toggleDrawer(true)" aria-label="Open menu">{{ icon('menu') }}</button>
+    <div class="brand">
+      <img src="/static/logo-light.png" class="brand-logo logo-on-dark" alt="tech-pro+">
+      <img src="/static/logo-dark.png" class="brand-logo logo-on-light" alt="tech-pro+">
+    </div>
+    <button class="icon-btn theme-toggle" onclick="toggleTheme()" aria-label="Switch between dark and light">
+      <span class="moon">{{ icon('moon', size=17) }}</span><span class="sun">{{ icon('sun', size=17) }}</span>
+    </button>
   </div>
 
   <nav class="sidebar" id="sidebar">
-    <div class="brand">🛠️ TechPro+ CRM</div>
-    <a href="/" class="{{ 'active' if request.url.path=='/' }}">📊 Dashboard</a>
-    <a href="/pos" class="{{ 'active' if request.url.path=='/pos' }}">🛒 Point of Sale</a>
-    <a href="/repairs" class="{{ 'active' if request.url.path.startswith('/repairs') }}">🔧 Repairs</a>
-    <a href="/invoices" class="{{ 'active' if request.url.path.startswith('/invoices') }}">🧾 Invoices</a>
-    <a href="/cashup" class="{{ 'active' if request.url.path=='/cashup' }}">💵 Cash Up</a>
-    <a href="/products" class="{{ 'active' if request.url.path=='/products' }}">📦 Products</a>
+    <div class="brand">
+      <a href="/" class="brand-link" aria-label="tech-pro+ dashboard">
+        <img src="/static/logo-light.png" class="brand-logo logo-on-dark" alt="tech-pro+">
+        <img src="/static/logo-dark.png" class="brand-logo logo-on-light" alt="tech-pro+">
+        <span class="brand-sub">Repair &amp; Retail</span>
+      </a>
+    </div>
+
+    <div class="nav-group">
+      <a href="/" class="{{ 'active' if request.url.path=='/' }}">{{ icon('bar-chart-3') }} Dashboard</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Counter</div>
+      <a href="/pos" class="{{ 'active' if request.url.path=='/pos' }}">{{ icon('shopping-cart') }} Point of Sale</a>
+      <a href="/invoices" class="{{ 'active' if request.url.path.startswith('/invoices') }}">{{ icon('receipt') }} Invoices</a>
+      <a href="/layaway" class="{{ 'active' if request.url.path.startswith('/layaway') }}">{{ icon('package-check') }} Layaway</a>
+      <a href="/cashup" class="{{ 'active' if request.url.path=='/cashup' }}">{{ icon('banknote') }} Cash Up</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Workshop</div>
+      <a href="/repairs" class="{{ 'active' if request.url.path.startswith('/repairs') }}">{{ icon('wrench') }} Repairs</a>
+      <a href="/trade-ins" class="{{ 'active' if request.url.path.startswith('/trade-ins') }}">{{ icon('smartphone') }} Trade-Ins</a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">Inventory</div>
+      <a href="/products" class="{{ 'active' if request.url.path=='/products' }}">{{ icon('package') }} Products</a>
+      {% if staff.role in ['owner','manager'] %}
+      <a href="/purchase-orders" class="{{ 'active' if request.url.path.startswith('/purchase-orders') or request.url.path=='/suppliers' }}">{{ icon('truck') }} Purchasing</a>
+      {% endif %}
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-group-label">People</div>
+      <a href="/customers" class="{{ 'active' if request.url.path.startswith('/customers') }}">{{ icon('user') }} Customers</a>
+      {% if staff.role in ['owner','manager'] %}
+      <a href="/staff" class="{{ 'active' if request.url.path=='/staff' }}">{{ icon('users') }} Staff</a>
+      {% endif %}
+    </div>
+
     {% if staff.role in ['owner','manager'] %}
-    <a href="/purchase-orders" class="{{ 'active' if request.url.path.startswith('/purchase-orders') or request.url.path=='/suppliers' }}">🚚 Purchasing</a>
+    <div class="nav-group">
+      <div class="nav-group-label">Business</div>
+      <a href="/reports" class="{{ 'active' if request.url.path=='/reports' }}">{{ icon('trending-up') }} Reports</a>
+      <a href="/audit" class="{{ 'active' if request.url.path=='/audit' }}">{{ icon('scroll-text') }} Audit Log</a>
+      {% if staff.role=='owner' %}
+      <a href="/settings" class="{{ 'active' if request.url.path=='/settings' }}">{{ icon('settings') }} Settings</a>
+      {% endif %}
+    </div>
     {% endif %}
-    <a href="/customers" class="{{ 'active' if request.url.path.startswith('/customers') }}">👤 Customers</a>
-    {% if staff.role in ['owner','manager'] %}
-    <a href="/reports" class="{{ 'active' if request.url.path=='/reports' }}">📈 Reports</a>
-    <a href="/staff" class="{{ 'active' if request.url.path=='/staff' }}">🧑‍🔧 Staff</a>
-    <a href="/audit" class="{{ 'active' if request.url.path=='/audit' }}">📜 Audit Log</a>
-    {% endif %}
-    {% if staff.role=='owner' %}
-    <a href="/settings" class="{{ 'active' if request.url.path=='/settings' }}">⚙️ Settings</a>
-    {% endif %}
+
     <div class="sidebar-footer">
-      <div class="staff-pill">{{ staff.name }} <span class="role-badge">{{ staff.role }}</span></div>
+      <div class="staff-pill">
+        <span class="staff-avatar">{{ staff.name[:1]|upper }}</span>
+        <span class="brand-text">
+          <span>{{ staff.name }}</span>
+          <span class="role-badge">{{ staff.role }}</span>
+        </span>
+      </div>
       <a href="/logout" class="logout-link">Log out</a>
     </div>
   </nav>
@@ -55,12 +112,17 @@
     {% if not request.url.path.startswith('/pos') %}
     <div class="util-bar">
       <form action="/search" method="get" class="search-box">
-        <span class="search-icon">🔎</span>
-        <input type="text" name="q" placeholder="Search customers, invoices, repairs…" value="{{ q or '' }}" autocomplete="off">
+        <span class="search-icon">{{ icon('search', size=15) }}</span>
+        <input type="text" name="q" id="globalSearch" placeholder="Search customers, invoices, repairs…" value="{{ q or '' }}" autocomplete="off">
+        <span class="kbd">Ctrl K</span>
       </form>
+      <div class="util-spacer"></div>
+      <button class="icon-btn theme-toggle" onclick="toggleTheme()" aria-label="Switch between dark and light">
+        <span class="moon">{{ icon('moon', size=17) }}</span><span class="sun">{{ icon('sun', size=17) }}</span>
+      </button>
       <div class="bell-wrap">
         <button class="bell" id="bellBtn" onclick="toggleBell()" aria-label="Notifications">
-          🔔<span class="bell-badge" id="bellBadge" style="display:none">0</span>
+          {{ icon('bell', size=17) }}<span class="bell-badge" id="bellBadge" style="display:none">0</span>
         </button>
         <div class="bell-dropdown" id="bellDropdown">
           <div class="bell-dropdown-title">Notifications</div>
@@ -73,17 +135,22 @@
   </main>
 
   <nav class="bottom-nav">
-    <a href="/" class="{{ 'active' if request.url.path=='/' }}"><span class="bn-icon">📊</span>Home</a>
-    <a href="/pos" class="{{ 'active' if request.url.path=='/pos' }}"><span class="bn-icon">🛒</span>Sale</a>
-    <a href="/repairs" class="{{ 'active' if request.url.path.startswith('/repairs') }}"><span class="bn-icon">🔧</span>Repairs</a>
-    <a href="/invoices" class="{{ 'active' if request.url.path.startswith('/invoices') }}"><span class="bn-icon">🧾</span>Invoices</a>
-    <a href="#" onclick="toggleDrawer(true);return false;"><span class="bn-icon">☰</span>More</a>
+    <a href="/" class="{{ 'active' if request.url.path=='/' }}"><span class="bn-icon">{{ icon('bar-chart-3') }}</span>Home</a>
+    <a href="/pos" class="{{ 'active' if request.url.path=='/pos' }}"><span class="bn-icon">{{ icon('shopping-cart') }}</span>Sale</a>
+    <a href="/repairs" class="{{ 'active' if request.url.path.startswith('/repairs') }}"><span class="bn-icon">{{ icon('wrench') }}</span>Repairs</a>
+    <a href="/invoices" class="{{ 'active' if request.url.path.startswith('/invoices') }}"><span class="bn-icon">{{ icon('receipt') }}</span>Invoices</a>
+    <a href="#" onclick="toggleDrawer(true);return false;"><span class="bn-icon">{{ icon('menu') }}</span>More</a>
   </nav>
 </div>
 <script>
 function toggleDrawer(open){
   document.getElementById('sidebar').classList.toggle('open', open);
   document.getElementById('drawerBackdrop').classList.toggle('open', open);
+}
+function toggleTheme(){
+  var next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', next);
+  try{ localStorage.setItem('tp-theme', next); }catch(e){}
 }
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/static/sw.js').catch(()=>{}));
@@ -96,13 +163,29 @@ document.addEventListener('click', (e) => {
   const wrap = document.querySelector('.bell-wrap');
   if (wrap && !wrap.contains(e.target)) document.getElementById('bellDropdown').classList.remove('open');
 });
+
+// Ctrl/Cmd-K jumps to search, Escape drops focus — the two shortcuts a
+// counter machine actually gets used with all day.
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    const box = document.getElementById('globalSearch');
+    if (box) { e.preventDefault(); box.focus(); box.select(); }
+  }
+  if (e.key === 'Escape') {
+    const box = document.getElementById('globalSearch');
+    if (box && document.activeElement === box) box.blur();
+    document.getElementById('bellDropdown')?.classList.remove('open');
+    toggleDrawer(false);
+  }
+});
+
 fetch('/api/notifications').then(r => r.json()).then(data => {
   const list = document.getElementById('bellList');
   const badge = document.getElementById('bellBadge');
   if (!list || !badge) return;
   const notes = data.notifications || [];
   if (notes.length === 0) {
-    list.innerHTML = '<div class="bell-empty">You\'re all caught up 🎉</div>';
+    list.innerHTML = '<div class="bell-empty">Nothing needs you right now.</div>';
     return;
   }
   badge.style.display = 'flex';
@@ -111,7 +194,7 @@ fetch('/api/notifications').then(r => r.json()).then(data => {
     `<a class="bell-item ${n.type}" href="${n.href}"><span>${n.icon}</span><span>${n.message}</span></a>`
   ).join('');
 }).catch(() => {
-  document.getElementById('bellList').innerHTML = '<div class="bell-empty">Couldn\'t load notifications</div>';
+  document.getElementById('bellList').innerHTML = '<div class="bell-empty">Notifications couldn\'t load. Refresh to try again.</div>';
 });
 </script>
 {% else %}

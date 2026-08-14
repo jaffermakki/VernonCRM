@@ -10,3 +10,5 @@ apscheduler
 psycopg2-binary
 cryptography
 sentry-sdk[fastapi]
+openpyxl
+python-barcode

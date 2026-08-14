@@ -14,14 +14,21 @@
 
 <div class="grid grid-4">
   <div class="card"><div class="stat-label">Total Sales Today</div><div class="stat-value text-green">${{ "%.2f"|format(total_sales) }}</div><div class="text-muted" style="font-size:12px">{{ invoice_count }} invoices</div></div>
-  <div class="card"><div class="stat-label">Cash Sales</div><div class="stat-value">${{ "%.2f"|format(cash_sales) }}</div></div>
-  <div class="card"><div class="stat-label">Card / Debit</div><div class="stat-value">${{ "%.2f"|format(card_sales) }}</div></div>
+  <div class="card"><div class="stat-label">Cash Sales</div><div class="stat-value{{ ' text-red' if cash_sales < 0 }}">${{ "%.2f"|format(cash_sales) }}</div>{% if cash_sales < 0 %}<div class="text-muted" style="font-size:11px">net outflow — change paid out exceeded cash taken in</div>{% endif %}</div>
+  <div class="card"><div class="stat-label">Card / Debit</div><div class="stat-value{{ ' text-red' if card_sales < 0 }}">${{ "%.2f"|format(card_sales) }}</div></div>
   <div class="card"><div class="stat-label">E-Transfer</div><div class="stat-value">${{ "%.2f"|format(etransfer_sales) }}</div></div>
 </div>
 
+{% if card_missing_ref > 0 %}
+<div class="card" style="border-color:var(--warn)">
+  {{ icon('triangle-alert') }} {{ card_missing_ref }} card sale{{ 's' if card_missing_ref != 1 }} today {{ 'has' if card_missing_ref == 1 else 'have' }}
+  no terminal reference recorded — worth checking against the terminal tape below before closing out.
+</div>
+{% endif %}
+
 <div class="card" style="max-width:480px">
   <h2>Cash Drawer Reconciliation</h2>
-  <form method="post" action="/cashup/close">
+  <form method="post" action="/cashup/close"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-row">
       <div class="form-group"><label>Opening Float ($)</label><input id="cu-float" name="open_float" type="number" step="0.01" value="{{ cash_float }}" oninput="recalc()"></div>
       <div class="form-group"><label>Expected Cash in Drawer</label><input id="cu-expected" type="number" value="{{ expected }}" disabled style="opacity:.6"></div>
@@ -39,9 +46,31 @@
     <div id="card-diff-display" style="display:none;padding:8px;border-radius:6px;margin-bottom:8px;font-size:13px"></div>
 
     <div class="form-group"><label>Notes (optional)</label><textarea name="notes" rows="2" placeholder="Any discrepancy notes…"></textarea></div>
-    <button class="btn-primary" style="width:100%">🔒 Close &amp; Record Cash-Up</button>
+    <button class="btn-primary" style="width:100%">{{ icon('lock') }} Close &amp; Record Cash-Up</button>
   </form>
 </div>
+
+{% if card_invoices_today %}
+<div class="card">
+  <h2>Today's Card Transactions <span class="text-muted" style="font-weight:400;font-size:12px">— cross-check against the terminal tape</span></h2>
+  <table>
+    <thead><tr><th>Time</th><th>Invoice</th><th>Amount</th><th>Reference</th></tr></thead>
+    <tbody>
+      {% for inv in card_invoices_today|sort(attribute='date') %}
+      <tr>
+        <td class="text-muted">{{ inv.date.strftime('%H:%M') }}</td>
+        <td><a href="/invoices/{{ inv.id }}">{{ inv.number }}</a></td>
+        <td>${{ "%.2f"|format(inv.card_amount) }}</td>
+        <td>
+          {% if inv.card_reference %}<span class="mono">{{ inv.card_reference }}</span>
+          {% else %}<span class="badge badge-amber">missing</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
 
 <div class="card">
   <h2>Recent Cash-Up History</h2>
@@ -80,13 +109,13 @@ function recalc(){
   const diff = actual - expected;
   el.style.display = 'block';
   if(Math.abs(diff) < 0.01){
-    el.style.background = 'rgba(74,222,128,.15)'; el.style.color = '#4ade80';
+    el.style.background = 'var(--green-soft)'; el.style.color = 'var(--green)';
     el.textContent = '✓ Drawer matches exactly';
   } else if(diff > 0){
-    el.style.background = 'rgba(251,191,36,.15)'; el.style.color = '#fbbf24';
+    el.style.background = 'var(--warn-soft)'; el.style.color = 'var(--warn)';
     el.textContent = `Drawer has $${diff.toFixed(2)} MORE than expected (overage)`;
   } else {
-    el.style.background = 'rgba(248,113,113,.15)'; el.style.color = '#f87171';
+    el.style.background = 'var(--red-soft)'; el.style.color = 'var(--red)';
     el.textContent = `Drawer has $${Math.abs(diff).toFixed(2)} LESS than expected (shortage)`;
   }
 }
@@ -98,13 +127,13 @@ function recalcCard(){
   const diff = batch - CARD_SALES;
   el.style.display = 'block';
   if(Math.abs(diff) < 0.01){
-    el.style.background = 'rgba(74,222,128,.15)'; el.style.color = '#4ade80';
+    el.style.background = 'var(--green-soft)'; el.style.color = 'var(--green)';
     el.textContent = '✓ Terminal batch matches the CRM\'s card sales exactly';
   } else if(diff > 0){
-    el.style.background = 'rgba(251,191,36,.15)'; el.style.color = '#fbbf24';
+    el.style.background = 'var(--warn-soft)'; el.style.color = 'var(--warn)';
     el.textContent = `Terminal shows $${diff.toFixed(2)} MORE than the CRM recorded — check for a sale rung up outside the CRM`;
   } else {
-    el.style.background = 'rgba(248,113,113,.15)'; el.style.color = '#f87171';
+    el.style.background = 'var(--red-soft)'; el.style.color = 'var(--red)';
     el.textContent = `Terminal shows $${Math.abs(diff).toFixed(2)} LESS than the CRM recorded — check for a declined/voided card transaction still marked as paid`;
   }
 }

@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><div class="eyebrow">Inventory</div><h1>Bulk-Create Variants</h1></div>
+  <div class="quick-actions"><a href="/products" class="btn-secondary" style="padding:9px 16px;border-radius:8px;font-weight:700">&larr; Back to Products</a></div>
+</div>
+
+{% if flash %}
+<div class="card" style="border-color:{{ 'var(--green)' if flash[0]=='green' else 'var(--red)' }}">{{ flash[1] }}</div>
+{% endif %}
+
+<div class="card">
+  <p class="text-muted" style="font-size:12px">Pick one style, check off every device it fits and every color it comes in, and this creates a separate tracked SKU for each combination in one pass. Works for phone cases, laptop sleeves/skins, and gaming controller or console skins — anything that comes in the same "one style x several models x several colors" shape. A single gaming accessory that isn't model-specific (a particular headset, a particular mouse) doesn't need this — just add it directly from the Products page instead. All variants generated together share the same price, cost, and starting stock; edit any of them individually afterward if one needs to differ.</p>
+</div>
+
+<form method="post" action="/products/bulk-variants/generate" id="bulk-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+  <div class="card">
+    <h2>1. Style</h2>
+    <div class="form-row">
+      <div class="form-group" style="flex:2">
+        <label>Style Name</label>
+        <input name="variant_group" list="case-style-options" placeholder="e.g. Hard Ring Case, Laptop Sleeve, Controller Skin" required>
+        <datalist id="case-style-options">
+          {% for style in common_case_styles + common_laptop_gaming_styles %}<option value="{{ style }}">{% endfor %}
+        </datalist>
+      </div>
+      <div class="form-group">
+        <label>Category</label>
+        <select name="category" id="bv-category" onchange="updateBrandOptions('bv-category','bv-brand')">
+          {% for key, label in category_labels.items() %}<option value="{{ key }}" {% if key=='CASE' %}selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Maker <span class="text-muted" style="font-weight:400">(optional)</span></label>
+        <select name="subcategory" id="bv-brand"></select>
+      </div>
+      <div class="form-group">
+        <label>SKU Prefix <span class="text-muted" style="font-weight:400">(optional)</span></label>
+        <input name="sku_prefix" placeholder="defaults to the style name">
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>2. Devices</h2>
+    <p class="text-muted" style="font-size:12px;margin-bottom:8px">Check every model this fits, from whichever section applies — phones, laptops, or gaming. New model not listed? Add it under "Other models" below instead of waiting on a list update.</p>
+
+    <details open style="margin-bottom:10px">
+      <summary style="cursor:pointer;font-weight:700;padding:6px 0">{{ icon('smartphone') }} Phone Models</summary>
+      <div style="padding-left:8px">
+        {% for brand in phone_brands %}
+          {% if phone_models[brand] %}
+          <details style="margin-bottom:6px">
+            <summary style="cursor:pointer;font-weight:600;padding:4px 0">{{ brand }}
+              <button type="button" class="btn-secondary btn-sm" style="margin-left:8px;padding:2px 8px;font-size:11px" onclick="toggleBrand(event, 'phone', '{{ brand }}')">select all / none</button>
+            </summary>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:4px;padding:6px 0 6px 12px">
+              {% for model in phone_models[brand] %}
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400">
+                <input type="checkbox" name="phone_selections" value="{{ brand }}||{{ model }}" class="device-cb" data-family="phone" data-brand="{{ brand }}" onchange="updatePreview()">
+                {{ model }}
+              </label>
+              {% endfor %}
+            </div>
+          </details>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </details>
+
+    <details style="margin-bottom:10px">
+      <summary style="cursor:pointer;font-weight:700;padding:6px 0">{{ icon('laptop') }} Laptop Models</summary>
+      <div style="padding-left:8px">
+        {% for brand in laptop_models %}
+          {% if laptop_models[brand] %}
+          <details style="margin-bottom:6px">
+            <summary style="cursor:pointer;font-weight:600;padding:4px 0">{{ brand }}
+              <button type="button" class="btn-secondary btn-sm" style="margin-left:8px;padding:2px 8px;font-size:11px" onclick="toggleBrand(event, 'laptop', '{{ brand }}')">select all / none</button>
+            </summary>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:4px;padding:6px 0 6px 12px">
+              {% for model in laptop_models[brand] %}
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400">
+                <input type="checkbox" name="phone_selections" value="{{ brand }}||{{ model }}" class="device-cb" data-family="laptop" data-brand="{{ brand }}" onchange="updatePreview()">
+                {{ model }}
+              </label>
+              {% endfor %}
+            </div>
+          </details>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </details>
+
+    <details style="margin-bottom:10px">
+      <summary style="cursor:pointer;font-weight:700;padding:6px 0">{{ icon('gamepad-2') }} Console / Controller Models</summary>
+      <div style="padding-left:8px">
+        {% for brand in console_models %}
+          {% if console_models[brand] %}
+          <details style="margin-bottom:6px">
+            <summary style="cursor:pointer;font-weight:600;padding:4px 0">{{ brand }}
+              <button type="button" class="btn-secondary btn-sm" style="margin-left:8px;padding:2px 8px;font-size:11px" onclick="toggleBrand(event, 'console', '{{ brand }}')">select all / none</button>
+            </summary>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:4px;padding:6px 0 6px 12px">
+              {% for model in console_models[brand] %}
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400">
+                <input type="checkbox" name="phone_selections" value="{{ brand }}||{{ model }}" class="device-cb" data-family="console" data-brand="{{ brand }}" onchange="updatePreview()">
+                {{ model }}
+              </label>
+              {% endfor %}
+            </div>
+          </details>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </details>
+
+    <div class="form-group" style="margin-top:8px">
+      <label>Other Models <span class="text-muted" style="font-weight:400">(one per line — "Brand: Model", e.g. "LG: Velvet")</span></label>
+      <textarea name="extra_models" rows="2" placeholder="LG: Velvet&#10;Nokia: G50" oninput="updatePreview()"></textarea>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3. Colors</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:4px">
+      {% for c in case_colors %}
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400">
+        <input type="checkbox" name="colors" value="{{ c }}" class="color-cb" onchange="updatePreview()">
+        {{ c }}
+      </label>
+      {% endfor %}
+    </div>
+    <div class="form-group" style="margin-top:8px">
+      <label>Other Colors <span class="text-muted" style="font-weight:400">(comma-separated)</span></label>
+      <input name="extra_colors" placeholder="Lavender, Mint Green" oninput="updatePreview()">
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>4. Pricing & Stock <span class="text-muted" style="font-size:12px;font-weight:400">(applies to every variant generated)</span></h2>
+    <div class="form-row">
+      <div class="form-group"><label>Cost</label><input name="cost" type="number" step="0.01" value="0"></div>
+      <div class="form-group"><label>Price</label><input name="price" type="number" step="0.01" required></div>
+      <div class="form-group"><label>Starting Stock</label><input name="stock" type="number" value="0"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Reorder At</label><input name="reorder_threshold" type="number" value="5"></div>
+      <div class="form-group"><label>Reorder Qty</label><input name="reorder_qty" type="number" value="10"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="total-row" style="font-weight:700;font-size:16px"><span>Will create</span><span id="preview-count">0 variants</span></div>
+    <button class="btn-primary" style="width:100%;margin-top:8px" onclick="return confirm(document.getElementById('preview-count').textContent + ' will be created. Continue?')">Generate Variants</button>
+  </div>
+</form>
+
+<script>
+const CAT_SUBCATEGORIES = {{ cat_subcategories|tojson }};
+function updateBrandOptions(catSelectId, brandSelectId, selected){
+  const cat = document.getElementById(catSelectId).value;
+  const brandSelect = document.getElementById(brandSelectId);
+  const opts = CAT_SUBCATEGORIES[cat] || ['Generic'];
+  brandSelect.innerHTML = opts.map(b => `<option value="${b}" ${b===selected?'selected':''}>${b}</option>`).join('');
+}
+updateBrandOptions('bv-category', 'bv-brand', 'Generic');
+
+function toggleBrand(evt, family, brand){
+  evt.preventDefault();
+  // Scoped by BOTH family and brand — "Microsoft" and "Other" appear
+  // under more than one device section, and this must only toggle the
+  // checkboxes under the section the button was actually clicked in.
+  const boxes = document.querySelectorAll(`.device-cb[data-family="${family}"][data-brand="${brand}"]`);
+  const anyUnchecked = Array.from(boxes).some(b => !b.checked);
+  boxes.forEach(b => b.checked = anyUnchecked);
+  updatePreview();
+}
+
+function updatePreview(){
+  const modelCount = document.querySelectorAll('.device-cb:checked').length
+    + document.querySelector('[name="extra_models"]').value.split('\n').map(s => s.trim()).filter(Boolean).length;
+  const colorCount = document.querySelectorAll('.color-cb:checked').length
+    + document.querySelector('[name="extra_colors"]').value.split(',').map(s => s.trim()).filter(Boolean).length;
+  document.getElementById('preview-count').textContent = `${modelCount * colorCount} variants (${modelCount} models × ${colorCount} colors)`;
+}
+updatePreview();
+</script>
+{% endblock %}
