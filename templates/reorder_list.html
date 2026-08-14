@@ -8,7 +8,7 @@
 </div>
 
 <div style="margin-bottom:14px;display:flex;gap:8px">
-  <a href="/products/reorder/print" target="_blank" class="btn-primary btn-sm">🖨️ Print Reorder Sheet</a>
+  <a href="/products/reorder/print" target="_blank" class="btn-primary btn-sm">{{ icon('printer') }} Print Reorder Sheet</a>
   <a href="/export/csv/reorder" class="btn-secondary btn-sm">⬇ Export CSV</a>
 </div>
 
@@ -27,7 +27,7 @@
         <td>${{ "%.2f"|format(p.cost * p.reorder_qty) }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="7" class="text-muted">Nothing needs reordering right now. 🎉</td></tr>
+      <tr><td colspan="7" class="text-muted">Nothing needs reordering right now. {{ icon('party-popper') }}</td></tr>
       {% endfor %}
     </tbody>
   </table>

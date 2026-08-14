@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block bare_content %}
+<div class="login-wrap">
+  <div class="login-box" style="width:320px;text-align:left">
+    <div style="text-align:center;margin-bottom:12px">
+      <div style="font-size:13px;color:var(--text2)">{{ icon('wrench') }} {{ shop_name }}</div>
+      <div style="font-size:16px;font-weight:700;margin-top:2px">Check Repair Status</div>
+    </div>
+
+    {% if result %}
+      <div class="card" style="padding:16px;margin-bottom:12px">
+        <div class="total-row"><span>Ticket</span><span style="font-weight:700">#{{ result.ticket_no }}</span></div>
+        <div class="total-row"><span>Device</span><span>{{ result.device }}</span></div>
+        <div class="total-row"><span>Status</span><span><span class="badge {{ result.status_badge }}">{{ result.status }}</span></span></div>
+        {% if result.promised_by %}<div class="total-row"><span>Promised By</span><span>{{ result.promised_by }}</span></div>{% endif %}
+      </div>
+      {% if result.ready %}
+      <div class="card" style="border-color:var(--green);padding:10px 14px;font-size:13px;text-align:center">{{ icon('circle-check') }} Ready for pickup!</div>
+      {% else %}
+      <div class="card" style="padding:10px 14px;font-size:13px;text-align:center;color:var(--text2)">Still being worked on — check back later or call the shop.</div>
+      {% endif %}
+      <div style="text-align:center;margin-top:12px">
+        <a href="/status" style="font-size:12px;color:var(--text2)">Check another ticket</a>
+      </div>
+    {% else %}
+      <form method="post" action="/status"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-group"><label>Ticket Number</label><input name="ticket_no" placeholder="e.g. 1042" required autofocus></div>
+        <div class="form-group"><label>Last 4 Digits of Your Phone</label><input name="phone_last4" placeholder="1234" maxlength="4" pattern="[0-9]{4}" required></div>
+        <button class="btn-primary" style="width:100%;margin-top:6px">Check Status</button>
+      </form>
+      {% if error %}<div class="error-text" style="margin-top:10px">{{ error }}</div>{% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

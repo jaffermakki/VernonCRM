@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Barcode Labels{% if group %} — {{ group }}{% endif %}</title>
+<style>
+  /* Default label size: 2in x 1in — a common thermal/sheet label size.
+     Change --label-w/--label-h below to match whatever labels are
+     actually loaded (e.g. 1.5in x 1in, or a 30-per-sheet Avery size).
+     Barcodes are generated server-side at a physically accurate size in
+     mm (see app/barcode_gen.py) and are NOT scaled down to fit here —
+     shrinking a barcode below its safe minimum bar width to force it
+     into a small box would make it unscannable, which is worse than a
+     label that's visibly too wide for the box. See the on-screen-only
+     "wide" warning below for labels that don't fit --label-w. */
+  :root { --label-w: 2in; --label-h: 1in; }
+
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; margin: 0; padding: 16px; background: #f3f3f3; color: #000; }
+
+  .toolbar {
+    max-width: 900px; margin: 0 auto 16px; background: #fff; border: 1px solid #ddd; border-radius: 8px;
+    padding: 14px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .toolbar h1 { font-size: 16px; margin: 0; flex: 1; min-width: 180px; }
+  .toolbar label { font-size: 12px; color: #444; }
+  .toolbar input[type=number] { width: 60px; padding: 5px; font-size: 13px; }
+  .toolbar button, .toolbar a.btn {
+    padding: 8px 16px; font-size: 13px; font-weight: 600; border-radius: 6px; border: 1px solid #ccc;
+    background: #f5f5f5; cursor: pointer; text-decoration: none; color: #000;
+  }
+  .toolbar button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+
+  .sheet {
+    max-width: 900px; margin: 0 auto; display: flex; flex-wrap: wrap; gap: 6px;
+    background: #fff; padding: 12px; border-radius: 8px;
+  }
+  .label {
+    width: var(--label-w); height: var(--label-h); border: 1px dashed #bbb; border-radius: 3px;
+    padding: 4px 6px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    overflow: visible; page-break-inside: avoid; position: relative;
+  }
+  .label .name { font-size: 9px; font-weight: 700; text-align: center; line-height: 1.15; max-width: 100%;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .label .price { font-size: 11px; font-weight: 700; margin-top: 1px; }
+  .label svg { display: block; margin-top: 1px; }
+  .label .sku-text { font-size: 8px; color: #333; letter-spacing: .3px; margin-top: -2px; white-space: nowrap; }
+  .label .wide-warning {
+    position: absolute; top: -9px; right: -6px; background: #f59e0b; color: #fff; font-size: 8px;
+    font-weight: 700; padding: 1px 5px; border-radius: 8px; white-space: nowrap;
+  }
+
+  .empty-note { max-width: 900px; margin: 0 auto; background: #fff; border-radius: 8px; padding: 24px; text-align: center; color: #666; }
+
+  @media print {
+    body { background: #fff; padding: 0; }
+    .toolbar { display: none; }
+    .sheet { border-radius: 0; padding: 0; gap: 0; }
+    .label { border: none; }
+    .wide-warning { display: none; }
+    @page { margin: 0.25in; }
+  }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <h1>{{ icon('tag') }} {{ products|length }} label{{ 's' if products|length != 1 }}{% if group %} — "{{ group }}"{% endif %}</h1>
+  <form method="get" action="/products/labels/print" style="display:flex;align-items:center;gap:8px">
+    {% if group %}<input type="hidden" name="group" value="{{ group }}">{% endif %}
+    {% if ids %}<input type="hidden" name="ids" value="{{ ids }}">{% endif %}
+    <label>Copies per SKU: <input type="number" name="copies" value="{{ copies }}" min="1" max="50"></label>
+    <button type="submit" class="btn">Update</button>
+  </form>
+  <a href="/products" class="btn">← Back to Products</a>
+  <button type="button" class="primary" onclick="window.print()">{{ icon('printer') }} Print</button>
+</div>
+
+{% if products %}
+<div class="sheet">
+  {% for p in products %}
+    {% set bc = barcode_by_sku.get(p.sku, {}) %}
+    {% for _ in range(copies) %}
+    <div class="label">
+      {% if bc.width_mm and bc.width_mm > 48 %}
+      <div class="wide-warning" title="This barcode is {{ bc.width_mm }}mm wide — wider than a standard 2in label. It will still print correctly, but may overlap the next label unless you use wider label stock or shorten this SKU.">{{ icon('triangle-alert') }} wide</div>
+      {% endif %}
+      <div class="name">{{ p.name }}</div>
+      {% if p.price %}<div class="price">${{ "%.2f"|format(p.price) }}</div>{% endif %}
+      {% if bc.svg %}
+        {{ bc.svg|safe }}
+      {% else %}
+        <div style="font-size:8px;color:#999">(barcode unavailable — SKU has characters CODE128 can't encode)</div>
+      {% endif %}
+      <div class="sku-text">{{ p.sku }}</div>
+    </div>
+    {% endfor %}
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-note">
+  No products matched. Go back to Products and use the {{ icon('tag') }} link on a case style or a single item to print labels for it.
+</div>
+{% endif %}
+</body>
+</html>

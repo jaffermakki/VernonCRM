@@ -13,13 +13,14 @@
 
 <div class="card collapsible-panel" id="new-ticket-panel">
   <h2>New Repair Ticket</h2>
-  <form method="post" action="/repairs/add">
+  <form method="post" action="/repairs/add"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-row">
       <div class="form-group"><label>Customer Phone</label><input name="phone" required></div>
       <div class="form-group"><label>Customer Name</label><input name="name" required></div>
     </div>
     <div class="form-row">
       <div class="form-group"><label>Device Model</label><input name="device" placeholder="iPhone 13 Pro, Samsung S22…" required></div>
+      <div class="form-group"><label>IMEI / Serial <span class="text-muted" style="font-weight:normal">(optional)</span></label><input name="imei" placeholder="15-digit IMEI or serial number"></div>
       <div class="form-group"><label>Issue Type</label>
         <select name="issue">
           {% for it in issue_types %}<option>{{ it }}</option>{% endfor %}
@@ -43,8 +44,8 @@
 </div>
 
 <div class="range-tabs">
-  <a href="/repairs?view=kanban" class="{{ 'active' if view=='kanban' }}">📋 Kanban</a>
-  <a href="/repairs?view=table" class="{{ 'active' if view=='table' }}">📄 Table</a>
+  <a href="/repairs?view=kanban" class="{{ 'active' if view=='kanban' }}">{{ icon('clipboard-list') }} Kanban</a>
+  <a href="/repairs?view=table" class="{{ 'active' if view=='table' }}">{{ icon('file-text') }} Table</a>
 </div>
 
 {% if view=='table' %}
@@ -62,18 +63,18 @@
         <td>{{ r.device }}</td>
         <td class="text-muted">{{ r.issue }}</td>
         <td><span class="badge {{ status_badge[r.status] }}">{{ status_labels[r.status] }}</span></td>
-        <td class="{{ 'text-red' if overdue else 'text-muted' }}">{{ r.promised_by or '—' }}{% if overdue %} ⚠{% endif %}</td>
+        <td class="{{ 'text-red' if overdue else 'text-muted' }}">{{ r.promised_by or '—' }}{% if overdue %} {{ icon('triangle-alert') }}{% endif %}</td>
         <td style="display:flex;gap:4px">
           <a href="/repairs/{{ r.id }}" class="btn-secondary btn-sm">Open</a>
           {% if r.status == 'READY' %}
-          <form method="post" action="/repairs/{{ r.id }}/notify">
-            <button class="btn-secondary btn-sm" title="Send ready SMS">📱</button>
+          <form method="post" action="/repairs/{{ r.id }}/notify"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn-secondary btn-sm" title="Send ready SMS">{{ icon('smartphone') }}</button>
           </form>
           {% endif %}
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="7"><div class="empty-state"><div class="icon">🔧</div>No repair tickets yet.</div></td></tr>
+      <tr><td colspan="7"><div class="empty-state"><div class="icon">{{ icon('wrench', size=32) }}</div>No repair tickets yet.</div></td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -91,7 +92,7 @@
     <a href="/repairs/{{ r.id }}" class="kanban-card {{ 'overdue' if overdue }}">
       <div class="kanban-card-top">
         <span class="text-muted" style="font-size:11px;font-family:var(--mono)">#{{ r.ticket_no }}</span>
-        {% if overdue %}<span class="text-red" style="font-size:11px;font-weight:700">⚠ overdue</span>{% endif %}
+        {% if overdue %}<span class="text-red" style="font-size:11px;font-weight:700">{{ icon('triangle-alert') }} overdue</span>{% endif %}
       </div>
       <div style="font-weight:700;font-size:13px;margin:3px 0">{{ r.device }}</div>
       <div class="text-muted" style="font-size:11.5px;margin-bottom:6px">{{ r.issue }}</div>

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Something went wrong — TechPro+</title>
+<script>
+(function(){
+  try{
+    var t = localStorage.getItem('tp-theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+  }catch(e){ document.documentElement.setAttribute('data-theme','dark'); }
+})();
+</script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<!--
+  Deliberately standalone — does NOT extend base.html. This page renders
+  when something has already gone wrong, possibly before `staff` or even
+  the database could be resolved, so it can't afford to depend on any of
+  the same context the rest of the app needs (sidebar nav, staff session,
+  etc.). Styled with the same stylesheet and tokens as everywhere else so
+  it still looks like the app, not a generic crash dump.
+-->
+<div class="login-wrap">
+  <div class="login-box" style="width:380px">
+    <div class="login-brand">
+      <img src="/static/logo-light.png" class="brand-logo logo-on-dark" alt="tech-pro+">
+      <img src="/static/logo-dark.png" class="brand-logo logo-on-light" alt="tech-pro+">
+    </div>
+    <div style="width:44px;height:44px;margin:6px auto 14px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:var(--red-soft);color:var(--red)">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
+        <path d="M12 9v4"/><path d="M12 17h.01"/>
+      </svg>
+    </div>
+    <div style="font-size:16px;font-weight:700;margin-bottom:6px">Something went wrong</div>
+    <div style="font-size:13px;color:var(--text-2);line-height:1.5;margin-bottom:22px">
+      That page hit an unexpected error. Nothing you were doing caused this —
+      it's been logged. Your cart, if you had one open, is untouched.
+    </div>
+    <a href="/" class="btn-primary" style="width:100%;display:flex;justify-content:center;margin-bottom:10px">Back to Dashboard</a>
+    <a href="/login" style="font-size:12px;color:var(--text-3)">Log out and back in</a>
+  </div>
+</div>
+</body>
+</html>

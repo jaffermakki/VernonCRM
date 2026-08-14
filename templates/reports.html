@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Reports</h1>
-<div style="margin-bottom:14px"><a href="/reports/eod" class="btn-secondary btn-sm">📅 Day-to-Day / End-of-Day Report</a></div>
+<div style="margin-bottom:14px"><a href="/reports/eod" class="btn-secondary btn-sm">{{ icon('calendar') }} Day-to-Day / End-of-Day Report</a></div>
 
 <div class="grid grid-3">
   <div class="card">
@@ -18,12 +18,29 @@
   </div>
   <div class="card">
     <div class="stat-label">Tax Collected (This Month)</div>
-    <div class="stat-value" style="color:#fbbf24">${{ "%.2f"|format(month_tax) }}</div>
+    <div class="stat-value" style="color:var(--warn)">${{ "%.2f"|format(month_tax) }}</div>
   </div>
   <div class="card">
     <div class="stat-label">Gross Profit (All Time)</div>
     <div class="stat-value text-green">${{ "%.2f"|format(profit) }}</div>
     <div class="text-muted" style="font-size:12px">Revenue minus product cost (COGS: ${{ "%.2f"|format(cogs) }})</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Sales — Last 14 Days</h2>
+  {% set max_day = (sales_by_day|map(attribute='total')|max) or 1 %}
+  <div style="display:flex;align-items:flex-end;gap:4px;height:140px;padding-top:8px" class="day-chart">
+    {% for d in sales_by_day %}
+    {% set pct = (d.total / max_day * 100) if max_day > 0 else 0 %}
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px">
+      <div class="text-muted day-chart-value" style="font-size:9px;white-space:nowrap">{% if d.total > 0 %}${{ "%.0f"|format(d.total) }}{% endif %}</div>
+      <div title="{{ d.label }}: ${{ '%.2f'|format(d.total) }}"
+        style="width:100%;max-width:26px;border-radius:3px 3px 0 0;min-height:2px;height:{{ pct }}%;
+        background:{{ 'var(--accent)' if not loop.last else 'var(--green)' }};transition:height .2s"></div>
+      <div class="text-muted day-chart-label" style="font-size:9px;white-space:nowrap">{{ d.label }}</div>
+    </div>
+    {% endfor %}
   </div>
 </div>
 

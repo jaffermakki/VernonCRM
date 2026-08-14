@@ -128,7 +128,7 @@
 <h1 class="no-print">Invoice {{ invoice.number }}</h1>
 {% if invoice.repair %}
 <div class="card no-print" style="display:flex;align-items:center;gap:8px;padding:10px 14px">
-  <span class="badge badge-blue">🔧 Repair</span>
+  <span class="badge badge-blue">{{ icon('wrench') }} Repair</span>
   <span>Generated from <a href="/repairs/{{ invoice.repair.id }}">Ticket #{{ invoice.repair.ticket_no }} — {{ invoice.repair.device }}</a></span>
 </div>
 {% endif %}
@@ -140,7 +140,7 @@
   <div class="inv-wrap">
     <div class="inv-header">
       <div class="inv-brand">
-        <img src="/static/logo.jpg" alt="{{ shop.name }}"/>
+        <img src="/static/logo-dark.png" alt="{{ shop.name }}"/>
         <p class="inv-brand-addr">
           <strong>{{ shop.name }}</strong><br/>
           {{ shop.address }}<br/>
@@ -170,7 +170,7 @@
     <div class="inv-billto">
       <div class="bt-label">Bill To</div>
       <div class="bt-name">{{ invoice.customer.name if invoice.customer else 'Walk-in Customer' }}</div>
-      {% if invoice.customer and invoice.customer.phone %}<div class="bt-meta">📞 {{ invoice.customer.phone }}</div>{% endif %}
+      {% if invoice.customer and invoice.customer.phone %}<div class="bt-meta">{{ icon('phone') }} {{ invoice.customer.phone }}</div>{% endif %}
     </div>
 
     <table class="inv-table">
@@ -180,7 +180,7 @@
       <tbody>
         {% for l in invoice.lines %}
         <tr>
-          <td style="font-weight:600">{{ l.name }}</td>
+          <td style="font-weight:600">{{ l.name }}{% if l.exchange_note %}<div style="font-weight:400;font-size:10px;color:#a89968;margin-top:2px">{{ icon('refresh-cw') }} {{ l.exchange_note }}</div>{% endif %}{% if l.imei %}<div style="font-weight:400;font-size:10px;color:#888;margin-top:2px">IMEI/Serial: {{ l.imei }}</div>{% endif %}</td>
           <td style="font-family:monospace;font-size:11px;color:#888">{{ l.sku or '—' }}</td>
           <td style="text-align:center">{{ l.qty }}</td>
           <td style="text-align:right">${{ "%.2f"|format(l.price) }}</td>
@@ -192,7 +192,7 @@
 
     {% if shop.gst %}
     <div class="inv-tax-note">
-      🍁 This invoice includes applicable Canadian taxes. GST/HST Registration: <strong>{{ shop.gst }}</strong>
+      {{ icon('leaf') }} This invoice includes applicable Canadian taxes. GST/HST Registration: <strong>{{ shop.gst }}</strong>
       {% if shop.pst %} · PST/QST: <strong>{{ shop.pst }}</strong>{% endif %}
     </div>
     {% endif %}
@@ -217,30 +217,52 @@
       <div class="inv-footer-left">Thank you for choosing {{ shop.name }}</div>
       <div class="inv-footer-right">{{ invoice.number }} · {{ invoice.date|datefmt('%b {d}, %Y') }}<br/>Prices in CAD · Taxes per {{ province_label }}</div>
     </div>
-    <div class="inv-eco-note">🌿 This invoice is designed to be printed minimally — consider saving digitally where possible</div>
+    <div class="inv-eco-note">{{ icon('leaf') }} This invoice is designed to be printed minimally — consider saving digitally where possible</div>
     <div style="text-align:center;margin-top:10px;padding:8px 0;border-top:1px solid #c8dece;font-size:12px;font-weight:700;letter-spacing:.5px;color:#1e3a28;font-family:'Inter',Arial,sans-serif">
-      ⚠️ NO REFUND — EXCHANGE ONLY
+      {{ icon('triangle-alert') }} NO REFUND — EXCHANGE ONLY
     </div>
     {% if invoice.refunded %}<div style="text-align:center;margin-top:14px"><span class="badge badge-red" style="font-size:12px">REFUNDED</span></div>{% endif %}
   </div>
 </div>
 
 <div class="no-print" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-  <button onclick="window.print()" class="btn-primary">🖨️ Print Invoice (A4)</button>
-  <a href="/invoices/{{ invoice.id }}/thermal" target="_blank" class="btn-secondary">🧾 Thermal Receipt</a>
-  <form method="post" action="/invoices/{{ invoice.id }}/email" style="display:flex;gap:6px">
+  <button onclick="window.print()" class="btn-primary">{{ icon('printer') }} Print Invoice (A4)</button>
+  <a href="/invoices/{{ invoice.id }}/thermal" target="_blank" class="btn-secondary">{{ icon('receipt') }} Thermal Receipt</a>
+  <form method="post" action="/invoices/{{ invoice.id }}/email" style="display:flex;gap:6px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input name="to_email" type="email" placeholder="{{ invoice.customer.email if invoice.customer and invoice.customer.email else 'customer@email.com' }}" value="{{ invoice.customer.email if invoice.customer else '' }}">
-    <button class="btn-secondary">✉️ Email Receipt</button>
+    <button class="btn-secondary">{{ icon('mail') }} Email Receipt</button>
   </form>
-  <form method="post" action="/invoices/{{ invoice.id }}/sms" style="display:flex;gap:6px">
+  <form method="post" action="/invoices/{{ invoice.id }}/sms" style="display:flex;gap:6px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input name="to_phone" type="tel" placeholder="{{ invoice.customer.phone if invoice.customer and invoice.customer.phone else '555-0100' }}" value="{{ invoice.customer.phone if invoice.customer else '' }}">
-    <button class="btn-secondary">📱 SMS Receipt</button>
+    <button class="btn-secondary">{{ icon('smartphone') }} SMS Receipt</button>
   </form>
   {% if can_refund and not invoice.refunded %}
-  <form method="post" action="/invoices/{{ invoice.id }}/refund" onsubmit="return confirm('Refund this invoice? This restocks items and cannot be undone.')">
+  <form method="post" action="/invoices/{{ invoice.id }}/refund" onsubmit="return confirm('Refund this invoice? This restocks items and cannot be undone.')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button class="btn-danger">Process Refund</button>
   </form>
   {% endif %}
 </div>
+
+{% if can_refund and not invoice.refunded and all_products %}
+<div class="card no-print" style="margin-top:10px">
+  <h2>Exchange an Item</h2>
+  <p class="text-muted" style="font-size:12px">Matches your invoice's exchange-only policy — swaps a line for a different product, restocks the original, and recalculates the total. You'll be told the exact price difference to collect or refund at the register.</p>
+  {% for l in invoice.lines %}
+  <form method="post" action="/invoices/{{ invoice.id }}/exchange-line/{{ l.id }}"
+        style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap"
+        onsubmit="return confirm('Exchange {{ l.name }} for the selected item?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <span style="min-width:160px;font-size:13px">{{ l.name }} <span class="text-muted">(${{ "%.2f"|format(l.price) }})</span></span>
+    <span style="color:var(--text3)">→</span>
+    <select name="new_product_id" required style="flex:1;min-width:180px">
+      <option value="">— Select replacement —</option>
+      {% for p in all_products %}
+      <option value="{{ p.id }}">{{ p.sku }} — {{ p.name }} (${{ "%.2f"|format(p.price) }}, {{ p.stock }} in stock)</option>
+      {% endfor %}
+    </select>
+    <button class="btn-secondary btn-sm">{{ icon('refresh-cw') }} Exchange</button>
+  </form>
+  {% endfor %}
+</div>
+{% endif %}
 <a href="/invoices" class="no-print">&larr; Back to invoices</a>
 {% endblock %}

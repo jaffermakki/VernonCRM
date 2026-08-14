@@ -7,15 +7,15 @@
 {% endif %}
 
 {% if not security_configured and staff.role == 'owner' %}
-<div class="card" style="border-color:#fbbf24">
-  ⚠ No security question is set up yet — anyone with Owner/Manager access can currently change a PIN without extra verification.
+<div class="card" style="border-color:var(--warn)">
+  {{ icon('triangle-alert') }} No security question is set up yet — anyone with Owner/Manager access can currently change a PIN without extra verification.
   <a href="/settings#security" class="btn-secondary btn-sm" style="margin-left:6px">Set one up in Settings →</a>
 </div>
 {% endif %}
 
 <div class="card">
   <h2>Add Staff Member</h2>
-  <form method="post" action="/staff/add" class="form-row" style="align-items:flex-end">
+  <form method="post" action="/staff/add" class="form-row" style="align-items:flex-end"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-group"><label>Name</label><input name="name" required></div>
     <div class="form-group"><label>4-Digit PIN</label><input name="pin" maxlength="4" pattern="\d{4}" required></div>
     <div class="form-group"><label>Role</label>
@@ -32,7 +32,7 @@
 
 <div class="card">
   <table>
-    <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Change PIN{% if security_configured %} <span class="text-muted" style="font-weight:400">🔒 requires security answer</span>{% endif %}</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Role</th><th>Status</th><th>Change PIN{% if security_configured %} <span class="text-muted" style="font-weight:400">{{ icon('lock') }} requires security answer</span>{% endif %}</th><th></th></tr></thead>
     <tbody>
       {% for s in all_staff %}
       {% set locked = s.role == 'owner' and staff.role != 'owner' %}
@@ -42,9 +42,9 @@
         <td>{% if s.active %}<span class="badge badge-green">Active</span>{% else %}<span class="badge badge-red">Disabled</span>{% endif %}</td>
         <td>
           {% if locked %}
-          <span class="text-muted" style="font-size:12px">🔒 Owner-protected</span>
+          <span class="text-muted" style="font-size:12px">{{ icon('lock') }} Owner-protected</span>
           {% else %}
-          <form method="post" action="/staff/{{ s.id }}/edit" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <form method="post" action="/staff/{{ s.id }}/edit" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="name" value="{{ s.name }}">
             <input type="hidden" name="role" value="{{ s.role }}">
             <input name="new_pin" maxlength="4" pattern="\d{4}" placeholder="New PIN" style="width:90px">
@@ -57,7 +57,7 @@
         </td>
         <td>
           {% if not locked %}
-          <form method="post" action="/staff/{{ s.id }}/toggle">
+          <form method="post" action="/staff/{{ s.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn-secondary btn-sm">{{ 'Disable' if s.active else 'Enable' }}</button>
           </form>
           {% endif %}

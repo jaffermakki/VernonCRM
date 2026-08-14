@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><div class="eyebrow">Layaway</div><h1>{{ layaway.number }}</h1></div>
+</div>
+
+{% if flash %}
+<div class="card" style="border-color:{{ 'var(--green)' if flash[0]=='green' else 'var(--red)' }}">{{ flash[1] }}</div>
+{% endif %}
+
+<div class="grid grid-2">
+  <div class="card">
+    <h2>Details</h2>
+    <div class="total-row"><span>Customer</span><span>{{ layaway.customer.name if layaway.customer else '—' }} ({{ layaway.customer.phone if layaway.customer }})</span></div>
+    <div class="total-row"><span>Started</span><span>{{ layaway.created_at.strftime("%Y-%m-%d %H:%M") }}</span></div>
+    <div class="total-row"><span>Due Date</span><span>{{ layaway.due_date or '—' }}</span></div>
+    <div class="total-row"><span>Status</span><span>
+      {% if layaway.status == 'active' %}<span class="badge badge-amber">Active</span>
+      {% elif layaway.status == 'completed' %}<span class="badge badge-green">Completed</span>
+      {% elif layaway.status == 'forfeited' %}<span class="badge badge-red">Forfeited</span>
+      {% else %}<span class="badge">Cancelled</span>{% endif %}
+    </span></div>
+    {% if layaway.status == 'completed' and layaway.invoice_id %}
+    <a href="/invoices/{{ layaway.invoice_id }}" class="btn-secondary btn-sm" style="margin-top:8px;display:inline-block">View Invoice →</a>
+    {% endif %}
+
+    {% if layaway.status == 'active' %}
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+      <h3 style="font-size:13px;margin-bottom:8px">Record a Payment</h3>
+      <form method="post" action="/layaway/{{ layaway.id }}/payment" style="display:flex;gap:6px;flex-wrap:wrap"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input name="amount" type="number" step="0.01" min="0.01" placeholder="Amount $" required style="flex:1;min-width:100px">
+        <select name="method" style="flex:1;min-width:100px">
+          <option value="Cash">Cash</option>
+          <option value="Debit">Debit</option>
+          <option value="Credit">Credit</option>
+          <option value="E-Transfer">E-Transfer</option>
+        </select>
+        <button class="btn-primary">Add Payment</button>
+      </form>
+    </div>
+
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+      <h3 style="font-size:13px;margin-bottom:8px;color:var(--red)">End This Layaway</h3>
+      <p class="text-muted" style="font-size:11px;margin-bottom:8px">Restocks the reserved items either way. "Cancelled" implies the customer's deposit gets refunded outside this system; "Forfeited" means the shop keeps what's been paid so far.</p>
+      <div style="display:flex;gap:6px">
+        <form method="post" action="/layaway/{{ layaway.id }}/cancel" style="flex:1" onsubmit="return confirm('Cancel this layaway and restock the items? The deposit is not automatically refunded by this action.')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="outcome" value="cancelled">
+          <button class="btn-secondary" style="width:100%">Cancel & Restock</button>
+        </form>
+        <form method="post" action="/layaway/{{ layaway.id }}/cancel" style="flex:1" onsubmit="return confirm('Mark this layaway forfeited? The shop keeps the amount already paid, and items are restocked.')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="outcome" value="forfeited">
+          <button class="btn-danger" style="width:100%">Mark Forfeited</button>
+        </form>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Balance</h2>
+    <div class="total-row"><span>Subtotal</span><span>${{ "%.2f"|format(layaway.subtotal) }}</span></div>
+    {% for t in tax_lines %}
+    <div class="total-row"><span>{{ t.label }}</span><span>${{ "%.2f"|format(t.amount) }}</span></div>
+    {% endfor %}
+    <div class="total-row" style="font-weight:700"><span>Total</span><span>${{ "%.2f"|format(layaway.total) }}</span></div>
+    <div class="total-row"><span>Paid So Far</span><span style="color:var(--green)">${{ "%.2f"|format(layaway.paid_total) }}</span></div>
+    <div class="total-row" style="font-weight:700;font-size:16px"><span>Balance Remaining</span><span>${{ "%.2f"|format(balance) }}</span></div>
+
+    <h3 style="font-size:13px;margin-top:14px;margin-bottom:6px">Payment History</h3>
+    {% for p in layaway.payments %}
+    <div class="total-row"><span class="text-muted">{{ p.created_at.strftime("%Y-%m-%d %H:%M") }} — {{ p.method }} ({{ p.staff_name }})</span><span>${{ "%.2f"|format(p.amount) }}</span></div>
+    {% else %}
+    <p class="text-muted" style="font-size:12px">No payments recorded yet.</p>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Items Reserved</h2>
+  <table>
+    <thead><tr><th>Item</th><th>SKU</th><th style="text-align:center">Qty</th><th style="text-align:right">Price</th><th style="text-align:right">Amount</th></tr></thead>
+    <tbody>
+      {% for item in cart %}
+      <tr>
+        <td style="font-weight:600">{{ item.name }}{% if item.imei %}<div style="font-weight:400;font-size:10px;color:var(--text-3);margin-top:2px">IMEI/Serial: {{ item.imei }}</div>{% endif %}</td>
+        <td class="text-muted" style="font-family:monospace;font-size:11px">{{ item.sku or '—' }}</td>
+        <td style="text-align:center">{{ item.qty }}</td>
+        <td style="text-align:right">${{ "%.2f"|format(item.price) }}</td>
+        <td style="text-align:right;font-weight:700">${{ "%.2f"|format(item.price * item.qty) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

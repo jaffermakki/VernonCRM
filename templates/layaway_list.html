@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <div><div class="eyebrow">Sales</div><h1>Layaway</h1></div>
+  <div class="quick-actions"><a href="/pos" class="btn-secondary" style="padding:9px 16px;border-radius:8px;font-weight:700">{{ icon('shopping-cart') }} Start a Sale</a></div>
+</div>
+
+<div class="card">
+  <div class="total-row"><span>Total Owed (all active layaways)</span><span style="font-weight:700">${{ "%.2f"|format(active_total_owed) }}</span></div>
+  <p class="text-muted" style="font-size:12px;margin-top:6px">To start a new layaway: add items to the cart on the Point of Sale page, attach a customer, then use "Start Layaway" instead of charging the sale.</p>
+</div>
+
+<div class="card">
+  <table>
+    <thead><tr><th>Number</th><th>Customer</th><th>Started</th><th>Due</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for l in layaways %}
+      <tr onclick="window.location='/layaway/{{ l.id }}'" style="cursor:pointer">
+        <td style="font-weight:700;font-family:monospace">{{ l.number }}</td>
+        <td>{{ l.customer.name if l.customer else '—' }}</td>
+        <td class="text-muted">{{ l.created_at.strftime("%Y-%m-%d") }}</td>
+        <td class="text-muted">{{ l.due_date or '—' }}</td>
+        <td>${{ "%.2f"|format(l.total) }}</td>
+        <td class="text-muted">${{ "%.2f"|format(l.paid_total) }}</td>
+        <td style="font-weight:700">${{ "%.2f"|format(l.total - l.paid_total) if l.status == 'active' else '0.00' }}</td>
+        <td>
+          {% if l.status == 'active' %}<span class="badge badge-amber">Active</span>
+          {% elif l.status == 'completed' %}<span class="badge badge-green">Completed</span>
+          {% elif l.status == 'forfeited' %}<span class="badge badge-red">Forfeited</span>
+          {% else %}<span class="badge">Cancelled</span>{% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8"><div class="empty-state"><div class="icon">{{ icon('package', size=32) }}</div>No layaways yet — start one from the Point of Sale page.</div></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -3,8 +3,9 @@
 <div class="page-head">
   <div><div class="eyebrow">Inventory</div><h1>Products</h1></div>
   <div class="quick-actions">
-    <a href="/products/reorder" class="btn-secondary" style="padding:9px 16px;border-radius:8px;font-weight:700">📋 Reorder List</a>
+    <a href="/products/reorder" class="btn-secondary" style="padding:9px 16px;border-radius:8px;font-weight:700">{{ icon('clipboard-list') }} Reorder List</a>
     {% if staff.role in ['owner','manager'] %}
+    <a href="/products/bulk-variants" class="btn-secondary" style="padding:9px 16px;border-radius:8px;font-weight:700">{{ icon('puzzle') }} Bulk-Create Variants</a>
     <button type="button" class="btn-primary" style="padding:9px 16px;border-radius:8px;font-weight:700"
       onclick="document.getElementById('new-product-panel').classList.toggle('open')">+ New Product</button>
     {% endif %}
@@ -13,18 +14,18 @@
 
 <div class="stat-grid" style="grid-template-columns:repeat({{ 3 if stock_value is not none else 2 }},1fr)">
   <div class="stat-card">
-    <span class="stat-icon">📦</span>
+    <span class="stat-icon">{{ icon('package') }}</span>
     <div class="stat-label">Total Products</div>
     <div class="stat-value">{{ products|length }}</div>
   </div>
   <div class="stat-card">
-    <span class="stat-icon">⚠️</span>
+    <span class="stat-icon">{{ icon('triangle-alert') }}</span>
     <div class="stat-label">Low Stock</div>
     <div class="stat-value {{ 'text-red' if low_stock_count > 0 else '' }}">{{ low_stock_count }}</div>
   </div>
   {% if stock_value is not none %}
   <div class="stat-card">
-    <span class="stat-icon">💰</span>
+    <span class="stat-icon">{{ icon('banknote') }}</span>
     <div class="stat-label">Total Stock Value</div>
     <div class="stat-value">${{ "%.2f"|format(stock_value) }}</div>
   </div>
@@ -32,13 +33,20 @@
 </div>
 
 {% if flash %}
-<div class="card" style="border-color:{{ 'var(--green)' if flash[0]=='green' else '#fbbf24' if flash[0]=='amber' else 'var(--red)' }}">{{ flash[1] }}</div>
+<div class="card" style="border-color:{{ 'var(--green)' if flash[0]=='green' else 'var(--warn)' if flash[0]=='amber' else 'var(--red)' }}">{{ flash[1] }}</div>
+{% endif %}
+
+{% if last_generated_group %}
+<div class="card" style="border-color:var(--accent);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+  <span style="font-size:13px">{{ icon('tag') }} Ready to put these on the shelf?</span>
+  <a href="/products/labels/print?group={{ last_generated_group|urlencode }}" class="btn-primary btn-sm">Print Barcode Labels for "{{ last_generated_group }}"</a>
+</div>
 {% endif %}
 
 {% if staff.role in ['owner','manager'] %}
 <div class="card collapsible-panel" id="new-product-panel">
   <h2>Add Product</h2>
-  <form method="post" action="/products/add" class="form-row" style="align-items:flex-end;flex-wrap:wrap">
+  <form method="post" action="/products/add" class="form-row" style="align-items:flex-end;flex-wrap:wrap"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-group"><label>SKU</label><input name="sku" required></div>
     <div class="form-group"><label>Name</label><input name="name" required placeholder="e.g. Clear Silicone Case — iPhone 15 — Black"></div>
     <div class="form-group"><label>Category</label>
@@ -72,7 +80,7 @@
 <div class="card">
   <h2>Bulk Import (CSV)</h2>
   <p class="text-muted" style="font-size:12px">Columns: <code>SKU, Name, Category, Brand, Price, Cost, Stock, Variant Group</code> (last column optional) — same format as the Inventory CSV export, so you can export, edit in a spreadsheet, and re-import. Existing SKUs are skipped, not overwritten.</p>
-  <form method="post" action="/products/import" enctype="multipart/form-data" style="display:flex;gap:8px">
+  <form method="post" action="/products/import" enctype="multipart/form-data" style="display:flex;gap:8px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="file" name="file" accept=".csv" required>
     <button class="btn-secondary">Import</button>
   </form>
@@ -80,35 +88,55 @@
 {% endif %}
 
 <div class="card">
-  <input type="text" id="product-filter" placeholder="🔎 Filter by SKU, name, category, brand, or variant group…"
-    style="width:100%;margin-bottom:12px;padding:9px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text)"
-    oninput="filterProducts()">
+  {% if all_phone_brands %}
+  <div class="form-row" style="align-items:flex-end;margin-bottom:4px">
+    <div class="form-group"><label>1. Brand</label>
+      <select id="drill-brand" onchange="onBrandChange()">
+        <option value="">— Select brand —</option>
+        {% for b in all_phone_brands %}<option value="{{ b }}">{{ b }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="form-group"><label>2. Model</label>
+      <select id="drill-model" onchange="onModelChange()" disabled>
+        <option value="">— Select brand first —</option>
+      </select>
+    </div>
+  </div>
+  <div class="hint" style="text-align:left;margin-bottom:10px">Pick the phone, laptop, or console a customer has to see every case/sleeve/skin style and color we carry for it — or skip straight to searching below.</div>
+  {% endif %}
+
+  <div class="search-box" style="max-width:none;margin-bottom:12px">
+    <span class="search-icon">{{ icon('search', size=15) }}</span>
+    <input type="text" id="product-filter" placeholder="Search by SKU, name, model, or case type…" oninput="filterProducts()">
+  </div>
 
   {% if product_groups %}
   <div id="grouped-products">
     {% for g in product_groups %}
-    <details class="variant-group" data-search="{{ g.name|lower }}">
+    <details class="variant-group" data-search="{{ g.name|lower }}" data-group-name="{{ g.name }}">
       <summary>
         <span class="variant-group-name">{{ g.name }}</span>
         <span class="variant-group-meta">
           {{ g.variants|length }} variant{{ 's' if g.variants|length != 1 }} · {{ g.total_stock }} total in stock
           {% if g.low_stock %}<span class="badge badge-red" style="margin-left:6px">low stock</span>{% endif %}
+          <a href="/products/labels/print?group={{ g.name|urlencode }}" class="btn-secondary btn-sm" style="margin-left:8px" onclick="event.stopPropagation()">{{ icon('tag') }} Print Labels</a>
         </span>
       </summary>
       <table>
-        <thead><tr><th>SKU</th><th>Name</th><th>Brand</th><th>Price</th><th>Stock</th><th></th></tr></thead>
+        <thead><tr><th>SKU</th><th>Name</th><th>Case Maker</th><th>Price</th><th>Stock</th><th></th></tr></thead>
         <tbody>
           {% for p in g.variants %}
-          <tr data-search="{{ (p.sku ~ ' ' ~ p.name ~ ' ' ~ category_labels.get(p.category, p.category) ~ ' ' ~ (p.subcategory or '') ~ ' ' ~ g.name)|lower }}">
+          <tr data-search="{{ (p.sku ~ ' ' ~ p.name ~ ' ' ~ category_labels.get(p.category, p.category) ~ ' ' ~ (p.subcategory or '') ~ ' ' ~ (p.phone_brand or '') ~ ' ' ~ (p.phone_model or '') ~ ' ' ~ (p.color or '') ~ ' ' ~ g.name)|lower }}" data-phone-brand="{{ p.phone_brand or '' }}" data-phone-model="{{ p.phone_model or '' }}">
             <td class="text-muted">{{ p.sku }}</td>
             <td>{{ p.name }}</td>
             <td class="text-muted">{{ p.subcategory or '—' }}</td>
             <td>${{ "%.2f"|format(p.price) }}</td>
             <td>{% if p.stock <= p.reorder_threshold %}<span class="badge badge-red">{{ p.stock }}</span>{% else %}{{ p.stock }}{% endif %}</td>
             <td style="display:flex;gap:6px">
+              <a href="/products/labels/print?ids={{ p.id }}" class="btn-secondary btn-sm" title="Print barcode label">{{ icon('tag') }}</a>
               {% if staff.role in ['owner','manager'] %}
               <a href="/products/{{ p.id }}/edit" class="btn-secondary btn-sm">Edit</a>
-              <form method="post" action="/products/{{ p.id }}/delete" onsubmit="return confirm('Delete {{ p.name }}?')">
+              <form method="post" action="/products/{{ p.id }}/delete" onsubmit="return confirm('Delete {{ p.name }}?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button class="btn-secondary btn-sm">Delete</button>
               </form>
               {% else %}<span class="text-muted" style="font-size:12px">—</span>{% endif %}
@@ -127,7 +155,7 @@
     <thead><tr><th>SKU</th><th>Name</th><th>Category</th><th>Brand</th><th>Price</th><th>Stock</th><th></th></tr></thead>
     <tbody>
       {% for p in ungrouped_products %}
-      <tr data-search="{{ (p.sku ~ ' ' ~ p.name ~ ' ' ~ category_labels.get(p.category, p.category) ~ ' ' ~ (p.subcategory or ''))|lower }}">
+      <tr data-search="{{ (p.sku ~ ' ' ~ p.name ~ ' ' ~ category_labels.get(p.category, p.category) ~ ' ' ~ (p.subcategory or '') ~ ' ' ~ (p.phone_brand or '') ~ ' ' ~ (p.phone_model or '') ~ ' ' ~ (p.color or ''))|lower }}" data-phone-brand="{{ p.phone_brand or '' }}" data-phone-model="{{ p.phone_model or '' }}">
         <td class="text-muted">{{ p.sku }}</td>
         <td>{{ p.name }}</td>
         <td>{{ category_labels.get(p.category, p.category) }}</td>
@@ -138,9 +166,10 @@
           {% else %}{{ p.stock }}{% endif %}
         </td>
         <td style="display:flex;gap:6px">
+          <a href="/products/labels/print?ids={{ p.id }}" class="btn-secondary btn-sm" title="Print barcode label">{{ icon('tag') }}</a>
           {% if staff.role in ['owner','manager'] %}
           <a href="/products/{{ p.id }}/edit" class="btn-secondary btn-sm">Edit</a>
-          <form method="post" action="/products/{{ p.id }}/delete" onsubmit="return confirm('Delete {{ p.name }}?')">
+          <form method="post" action="/products/{{ p.id }}/delete" onsubmit="return confirm('Delete {{ p.name }}?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn-secondary btn-sm">Delete</button>
           </form>
           {% else %}
@@ -150,16 +179,18 @@
       </tr>
       {% else %}
       {% if not product_groups %}
-      <tr><td colspan="7"><div class="empty-state"><div class="icon">📦</div>No products yet.</div></td></tr>
+      <tr><td colspan="7"><div class="empty-state"><div class="icon">{{ icon('package', size=32) }}</div>No products yet.</div></td></tr>
       {% endif %}
       {% endfor %}
     </tbody>
   </table>
-  <div id="no-results" class="empty-state" style="display:none"><div class="icon">🔎</div>No products match that search.</div>
+  <div id="no-results" class="empty-state" style="display:none"><div class="icon">{{ icon('search', size=32) }}</div>Nothing matches that search or filter.</div>
 </div>
 
 <script>
 const CAT_SUBCATEGORIES = {{ cat_subcategories|tojson }};
+const PHONE_MENU = {{ phone_menu|tojson }};
+
 function updateBrandOptions(catSelectId, brandSelectId, selected){
   const cat = document.getElementById(catSelectId).value;
   const brandSelect = document.getElementById(brandSelectId);
@@ -168,34 +199,91 @@ function updateBrandOptions(catSelectId, brandSelectId, selected){
 }
 updateBrandOptions('ap-category','ap-brand');
 
+function onBrandChange(){
+  const brand = document.getElementById('drill-brand').value;
+  const modelSelect = document.getElementById('drill-model');
+  const models = PHONE_MENU[brand] || [];
+  modelSelect.disabled = !brand;
+  modelSelect.innerHTML = brand
+    ? '<option value="">All ' + brand + ' models</option>' + models.map(m => `<option value="${m}">${m}</option>`).join('')
+    : '<option value="">— Select brand first —</option>';
+  applyPhoneFilter();
+}
+function onModelChange(){ applyPhoneFilter(); }
+
+function applyPhoneFilter(){
+  // Only takes effect when the search box is empty — typing a search
+  // always takes priority over the brand/model selectors.
+  const q = document.getElementById('product-filter').value.trim();
+  if (q) return;
+
+  const brand = document.getElementById('drill-brand') ? document.getElementById('drill-brand').value : '';
+  const model = document.getElementById('drill-model') ? document.getElementById('drill-model').value : '';
+
+  // No filter selected -> flat view, everything visible (collapsed).
+  if (!brand) {
+    document.querySelectorAll('[data-phone-brand]').forEach(row => row.style.display = '');
+    document.querySelectorAll('#grouped-products details.variant-group').forEach(g => { g.style.display = ''; g.open = false; });
+    document.getElementById('no-results').style.display = 'none';
+    return;
+  }
+
+  let visible = 0;
+  document.querySelectorAll('#grouped-products details.variant-group').forEach(group => {
+    let groupHasMatch = false;
+    group.querySelectorAll('tbody tr[data-phone-brand]').forEach(row => {
+      const match = row.dataset.phoneBrand === brand && (!model || row.dataset.phoneModel === model);
+      row.style.display = match ? '' : 'none';
+      if (match) { groupHasMatch = true; visible++; }
+    });
+    group.style.display = groupHasMatch ? '' : 'none';
+    group.open = groupHasMatch;
+  });
+
+  // Ungrouped rows only carry phone_brand/model if they're phone-related
+  // accessories outside a variant group — filter the same way.
+  document.querySelectorAll('#product-table tbody tr[data-phone-brand]').forEach(row => {
+    if (!row.dataset.phoneBrand) return;  // non-phone items (chargers, cables) stay as-is, untouched by this filter
+    const match = row.dataset.phoneBrand === brand && (!model || row.dataset.phoneModel === model);
+    row.style.display = match ? '' : 'none';
+    if (match) visible++;
+  });
+
+  document.getElementById('no-results').style.display = (visible === 0) ? 'block' : 'none';
+}
+
 function filterProducts(){
   const q = document.getElementById('product-filter').value.toLowerCase().trim();
+
+  if (!q) { applyPhoneFilter(); return; }  // empty search -> hand back to the brand/model selectors
 
   // Ungrouped rows: simple show/hide, same as before.
   const flatRows = document.querySelectorAll('#product-table tbody tr[data-search]');
   let visible = 0;
   flatRows.forEach(row => {
-    const match = !q || row.dataset.search.includes(q);
+    const match = row.dataset.search.includes(q);
     row.style.display = match ? '' : 'none';
     if (match) visible++;
   });
 
-  // Grouped rows: hide non-matching variant rows within each group, and
-  // auto-expand any group that has at least one match so search results
-  // are actually visible instead of hidden inside a collapsed <details>.
+  // Grouped rows: search across ALL groups regardless of brand/model
+  // selection, and auto-expand any group with a match.
   document.querySelectorAll('#grouped-products details.variant-group').forEach(group => {
     const rows = group.querySelectorAll('tbody tr[data-search]');
-    let groupHasMatch = !q;
+    let groupHasMatch = group.dataset.search.includes(q);
     rows.forEach(row => {
-      const match = !q || row.dataset.search.includes(q);
+      const match = row.dataset.search.includes(q);
       row.style.display = match ? '' : 'none';
       if (match) { groupHasMatch = true; visible++; }
     });
-    group.style.display = (!q || groupHasMatch) ? '' : 'none';
-    if (q && groupHasMatch) group.open = true;
+    if (groupHasMatch && !rows.length) visible++;  // group name itself matched
+    group.style.display = groupHasMatch ? '' : 'none';
+    if (groupHasMatch) group.open = true;
   });
 
-  document.getElementById('no-results').style.display = (q && visible === 0) ? 'block' : 'none';
+  document.getElementById('no-results').style.display = (visible === 0) ? 'block' : 'none';
 }
+
+applyPhoneFilter();  // flat view on page load: everything visible, collapsed
 </script>
 {% endblock %}

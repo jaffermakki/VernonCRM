@@ -1,0 +1,305 @@
+{#
+  POS cart + payment panel.
+  Rendered two ways from the same context (pos_cart_context() in app/main.py):
+    1. Included here on a full GET /pos page load.
+    2. Returned standalone, as this file, by every cart-mutating POST
+       (add/remove/qty/discount/customer/redeem/hold/recall/...) when the
+       request carries the X-Pos-Ajax header -- the till's own fetch() JS
+       swaps it into #cart-panel in place, so nothing on this screen ever
+       does a full page reload. Any POST without that header (no JS, a
+       stale tab, curl) still gets the original full-page redirect, so
+       this never depends on JavaScript being present to work at all.
+#}
+<!-- Carries the authoritative total into every response — full page load
+     AND every AJAX swap alike, since this whole file gets re-rendered by
+     the server either way. #cart-panel's own attributes do NOT get this:
+     an innerHTML swap only replaces children, never the container's own
+     attributes, so a data-total on #cart-panel itself would freeze at
+     whatever it was on the last full page load (almost always $0, from
+     before anything was in the cart) and every "Change" calculation
+     downstream of it would be wrong from then on. -->
+<div id="cart-total-carrier" data-total="{{ total }}" style="display:none"></div>
+{% if scan_error %}
+    <div class="mx-3 mt-2 px-3 py-2 rounded-lg text-xs" style="background:var(--red-soft);border:1px solid var(--red-soft);color:var(--red)">{{ scan_error }}</div>
+    {% endif %}
+    <!-- Customer selector -->
+    <div class="p-3 flex gap-2" style="border-bottom:1px solid var(--border)">
+      <form method="post" action="/pos/customer" class="flex-1" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <select name="customer_id" onchange="this.form.requestSubmit()"
+          class="w-full rounded-lg px-3 py-2 text-sm focus:outline-none"
+          style="background:var(--surface-inset);border:1px solid var(--border-strong);color:var(--text)">
+          <option value="">Walk-in Customer</option>
+          {% for c in customers %}
+          <option value="{{ c.id }}" {% if c.id==customer_id %}selected{% endif %}>{{ c.name }}</option>
+          {% endfor %}
+        </select>
+      </form>
+      <button onclick="document.getElementById('hold-panel').classList.toggle('hidden')"
+        class="px-3 py-2 rounded-lg text-xs font-medium whitespace-nowrap"
+        style="background:var(--surface-3);color:var(--text-2)">
+        Hold {% if held_carts %}({{ held_carts|length }}){% endif %}
+      </button>
+    </div>
+
+    <!-- Loyalty panel -->
+    {% if selected_customer %}
+    <div class="mx-3 mt-2 rounded-xl p-2.5" style="background:var(--accent-soft);border:1px solid var(--accent-soft)">
+      <div class="flex justify-between items-center mb-2">
+        <span class="font-semibold text-sm" style="color:var(--accent-text)">{{ selected_customer.name }}</span>
+        <span class="text-xs" style="color:var(--text-3)">${{ "%.2f"|format(selected_customer.spent) }} spent</span>
+      </div>
+      <div class="flex gap-2">
+        <form method="post" action="/pos/redeem-points" class="flex gap-1 flex-1" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="number" name="points" min="{{ points_redeem_rate|int }}" step="{{ points_redeem_rate|int }}"
+            placeholder="{{ selected_customer.points }}pts"
+            class="w-full rounded px-2 py-1 text-xs text-white" style="background:var(--surface-inset);border:1px solid var(--border-strong)"
+            {% if selected_customer.points < points_redeem_rate %}disabled{% endif %}>
+          <button class="px-2 py-1 rounded text-xs font-bold"
+            style="background:var(--warn-soft);color:var(--warn)">Pts</button>
+        </form>
+        <form method="post" action="/pos/redeem-credit" class="flex gap-1 flex-1" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="number" name="amount" min="0.01" step="0.01" max="{{ selected_customer.store_credit }}"
+            placeholder="${{ '%.0f'|format(selected_customer.store_credit) }} cr"
+            class="w-full rounded px-2 py-1 text-xs text-white" style="background:var(--surface-inset);border:1px solid var(--border-strong)"
+            {% if selected_customer.store_credit <= 0 %}disabled{% endif %}>
+          <button class="px-2 py-1 rounded text-xs font-bold"
+            style="background:var(--green-soft);color:var(--green)">Cr</button>
+        </form>
+      </div>
+      {% if loyalty_discount>0 %}<div class="text-xs mt-1.5" style="color:var(--green)">✓ ${{ "%.2f"|format(loyalty_discount) }} loyalty applied</div>{% endif %}
+      {% if store_credit_used>0 %}<div class="text-xs" style="color:var(--green)">✓ ${{ "%.2f"|format(store_credit_used) }} credit applied</div>{% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Held carts panel -->
+    <div id="hold-panel" class="hidden mx-3 mt-2 rounded-xl p-2" style="background:var(--surface-inset);border:1px solid var(--border-strong)">
+      <div class="text-xs font-semibold mb-1.5" style="color:var(--text-3)">Held Carts</div>
+      {% for h in held_carts %}
+      <div class="flex items-center justify-between py-1.5" style="border-bottom:1px solid var(--border)">
+        <span class="text-sm" style="color:var(--text)">{{ h.name }}</span>
+        <div class="flex gap-1">
+          <form method="post" action="/pos/recall/{{ h.id }}" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="px-2 py-1 rounded text-xs font-bold" style="background:var(--warn-soft);color:var(--warn)">Recall</button>
+          </form>
+          <form method="post" action="/pos/held/{{ h.id }}/delete" onsubmit="return confirm('Delete?')" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="px-2 py-1 rounded text-xs" style="background:var(--surface-3);color:var(--text-2)">✕</button>
+          </form>
+        </div>
+      </div>
+      {% else %}
+      <div class="text-xs text-center py-2" style="color:var(--text-3)">No held carts</div>
+      {% endfor %}
+      <form method="post" action="/pos/hold" class="flex gap-1 mt-2" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input name="name" placeholder="Name this cart..."
+          class="flex-1 rounded px-2 py-1.5 text-xs text-white" style="background:var(--surface-2);border:1px solid var(--border-strong)">
+        <button class="px-3 py-1.5 rounded text-xs font-medium" style="background:var(--surface-3);color:var(--text-2)"
+          {% if not cart %}disabled{% endif %}>Hold</button>
+      </form>
+    </div>
+
+    <!-- Cart items -->
+    <div class="px-3 pt-2.5 pb-1 flex items-center justify-between" style="border-bottom:1px solid var(--border)">
+      <span class="text-xs font-bold uppercase tracking-wide" style="color:var(--text-3)">Cart</span>
+      {% if cart %}
+      <span class="text-xs font-bold px-2 py-0.5 rounded-full" style="background:rgba(255,211,77,.15);color:var(--accent-text)">{{ cart|length }} item{{ 's' if cart|length != 1 }}</span>
+      {% endif %}
+    </div>
+    <div class="flex-1 overflow-y-auto cart-scroll px-3 py-2" id="cart-items-scroll">
+      {% if cart %}
+      {% for item in cart %}
+      <div class="flex items-center gap-2 py-2" style="border-bottom:1px solid var(--border)">
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium truncate" style="color:var(--text)">{{ item.name }}</div>
+          <div class="text-xs font-mono" style="color:var(--text-3)">${{ "%.2f"|format(item.price) }}</div>
+        </div>
+        <form method="post" action="/pos/qty/{{ loop.index0 }}" class="flex items-center gap-1" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button name="qty" value="{{ item.qty - 1 }}"
+            class="w-7 h-7 flex items-center justify-center rounded font-bold text-sm"
+            style="background:var(--surface-3);color:var(--text-2)">−</button>
+          <span class="w-6 text-center font-bold text-sm" style="color:var(--text)">{{ item.qty }}</span>
+          <button name="qty" value="{{ item.qty + 1 }}"
+            class="w-7 h-7 flex items-center justify-center rounded font-bold text-sm"
+            style="background:var(--surface-3);color:var(--text-2)">+</button>
+        </form>
+        <div class="font-bold text-sm w-16 text-right" style="color:var(--text)">${{ "%.2f"|format(item.price * item.qty) }}</div>
+        <form method="post" action="/pos/remove/{{ loop.index0 }}" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="w-6 h-6 flex items-center justify-center rounded" style="color:var(--text-3)" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--text-3)'">✕</button>
+        </form>
+      </div>
+      <form method="post" action="/pos/imei/{{ loop.index0 }}" class="flex items-center gap-1" style="padding:0 0 6px 0" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input name="imei" value="{{ item.imei or '' }}" placeholder="IMEI/serial (for phones — optional)" class="flex-1" style="font-size:11px;padding:3px 6px;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:4px;color:var(--text-2)">
+        <button class="btn-secondary" style="font-size:11px;padding:3px 8px">Save</button>
+      </form>
+      {% endfor %}
+      {% else %}
+      <div class="flex flex-col items-center justify-center h-full gap-2 py-8" style="color:var(--text-3)">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
+        <span class="text-sm">Cart is empty</span>
+        <span class="text-xs">Tap a product or scan a barcode</span>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Totals -->
+    <div class="px-3 py-2" style="border-top:1px solid var(--border)">
+      <div class="flex items-center justify-between mb-1.5">
+        <span class="text-xs" style="color:var(--text-3)">Subtotal</span>
+        <form method="post" action="/pos/subtotal" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="number" name="value" step="0.01" min="0" value="{{ '%.2f'|format(sub) }}"
+            class="w-24 rounded px-2 py-1 text-sm text-right font-bold focus:outline-none"
+            style="background:var(--surface-inset);border:1px solid var(--border-strong);color:var(--text)"
+            onchange="this.form.requestSubmit()">
+        </form>
+      </div>
+      <div class="flex items-center justify-between mb-1.5">
+        <div class="flex items-center gap-1.5">
+          <span class="text-xs" style="color:var(--text-3)">Discount</span>
+          <form method="post" action="/pos/discount" id="disc-main-form" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="mode" id="disc-mode-field" value="{{ disc_mode }}">
+            <span class="flex rounded overflow-hidden text-xs" style="border:1px solid var(--border-strong)">
+              <button type="button" onclick="setDiscMode('$')"
+                class="px-2 py-0.5 font-bold" id="disc-btn-dollar"
+                style="{% if disc_mode=='$' %}background:var(--accent);color:var(--on-accent){% else %}background:var(--surface-2);color:var(--text-3){% endif %}">$</button>
+              <button type="button" onclick="setDiscMode('%')"
+                class="px-2 py-0.5 font-bold" id="disc-btn-pct"
+                style="{% if disc_mode=='%' %}background:var(--accent);color:var(--on-accent){% else %}background:var(--surface-2);color:var(--text-3){% endif %}">%</button>
+              <input type="number" name="value" id="disc-input" step="0.01" min="0" value="{{ disc_raw }}"
+                class="w-16 px-2 py-0.5 text-sm text-right focus:outline-none"
+                style="background:var(--surface-inset);color:var(--text)"
+                onchange="this.form.requestSubmit()">
+            </span>
+          </form>
+        </div>
+        {% if disc_mode=='%' and disc_raw>0 %}
+        <span class="text-xs" style="color:var(--text-3)">= ${{ "%.2f"|format(disc) }} off</span>
+        {% endif %}
+      </div>
+      {% if disc>0 %}
+      <div class="flex justify-between text-xs mb-0.5" style="color:var(--green)"><span>Discount</span><span>−${{ "%.2f"|format(disc) }}</span></div>
+      {% endif %}
+      {% for tl in tax.lines %}
+      <div class="flex justify-between text-xs mb-0.5" style="color:var(--text-2)"><span>{{ tl.label }}</span><span>${{ "%.2f"|format(tl.amount) }}</span></div>
+      {% endfor %}
+      <div class="flex justify-between items-center mt-2 pt-2" style="border-top:1px solid var(--accent-border)">
+        <span class="font-bold text-lg" style="color:var(--text)">Total</span>
+        <span class="font-bold text-2xl" style="color:var(--accent-text)">${{ "%.2f"|format(total) }}</span>
+      </div>
+    </div>
+
+    <!-- Payment -->
+    <div class="p-3" style="border-top:1px solid var(--border);background:var(--surface-inset)">
+      <!-- Payment pills -->
+      <div class="flex gap-1.5 mb-3 flex-wrap">
+        {% for pm in ["Cash","Card","UPI","E-Transfer","Store Credit","Split"] %}
+        <button type="button" onclick="selectPayment('{{ pm }}')"
+          id="pm-{{ pm|replace(' ','_') }}"
+          class="pay-pill px-3 py-1.5 rounded-full text-xs font-semibold"
+          style="border:1px solid var(--border-strong);background:var(--surface-2);color:var(--text-3)">{{ pm }}</button>
+        {% endfor %}
+      </div>
+
+      <!-- Cash section -->
+      <div id="section-Cash">
+        <div class="flex gap-2 mb-2">
+          <div class="flex-1">
+            <div class="text-xs mb-1" style="color:var(--text-3)">Tendered</div>
+            <input type="number" id="tendered-input" step="0.01" min="0" placeholder="0.00"
+              class="w-full rounded-lg px-3 py-2 text-base font-bold focus:outline-none"
+              style="background:var(--surface-2);border:1px solid var(--border-strong);color:var(--text)"
+              oninput="updateChange()">
+          </div>
+          <div class="flex-1">
+            <div class="text-xs mb-1" style="color:var(--text-3)">Change</div>
+            <div id="change-display" class="w-full rounded-lg px-3 py-2 text-base font-bold"
+              style="background:var(--surface-2);border:1px solid var(--border-strong);color:var(--text-2)">$0.00</div>
+          </div>
+        </div>
+        <div class="grid grid-cols-4 gap-1 mb-2">
+          {% for amt in [5,10,20,50,100,200] %}
+          <button type="button" onclick="setTendered({{ amt }})"
+            class="py-1.5 rounded text-xs font-medium" style="background:var(--surface-2);color:var(--text-2)">${{ amt }}</button>
+          {% endfor %}
+          <button type="button" onclick="setExact()"
+            class="col-span-2 py-1.5 rounded text-xs font-bold" style="background:var(--surface-2);color:var(--accent-text)">Exact</button>
+        </div>
+      </div>
+
+      <!-- Split payment -->
+      <div id="section-Split" class="hidden mb-2">
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <div class="text-xs mb-1" style="color:var(--text-3)">Cash</div>
+            <input type="number" id="split-cash" step="0.01" min="0" placeholder="0.00"
+              class="w-full rounded-lg px-3 py-2 font-bold focus:outline-none"
+              style="background:var(--surface-2);border:1px solid var(--border-strong);color:var(--text)"
+              oninput="updateSplitChange()">
+          </div>
+          <div>
+            <div class="text-xs mb-1" style="color:var(--text-3)">Card</div>
+            <input type="number" id="split-card" step="0.01" min="0" placeholder="0.00"
+              class="w-full rounded-lg px-3 py-2 font-bold focus:outline-none"
+              style="background:var(--surface-2);border:1px solid var(--border-strong);color:var(--text)"
+              oninput="updateSplitChange()">
+          </div>
+        </div>
+        <div id="split-status" class="text-xs mt-1 text-right" style="color:var(--text-3)"></div>
+      </div>
+
+      <!-- UPI info -->
+      <div id="section-UPI" class="hidden mb-2 rounded-lg p-2.5 text-center" style="background:var(--surface-2);border:1px solid var(--border-strong)">
+        <div class="text-xs mb-1" style="color:var(--text-2)">Ask customer to scan your UPI QR</div>
+        <div class="font-bold text-lg" style="color:var(--accent-text)">${{ "%.2f"|format(total) }}</div>
+      </div>
+
+      <!-- Card reference — shown for Card and Split, the two methods with
+           an actual card-terminal component to reconcile against later. -->
+      <div id="section-CardRef" class="hidden mb-2">
+        <div class="text-xs mb-1" style="color:var(--text-3)">Card ref / approval code <span style="font-weight:400">(optional)</span></div>
+        <input type="text" id="card-ref-input" placeholder="From the terminal receipt" maxlength="64"
+          class="w-full rounded-lg px-3 py-2 text-sm focus:outline-none"
+          style="background:var(--surface-2);border:1px solid var(--border-strong);color:var(--text)">
+      </div>
+
+      <!-- Reinforces the ring-up-then-Moneris order right where the habit
+           either sticks or slips: the moment a cashier reaches for this
+           button. There's no terminal integration yet, so this button does
+           NOT charge the card — it only saves a sale that was already
+           charged on the terminal. Shown for Card and Split only; Cash
+           needs no such reminder, and UPI/E-Transfer/Store Credit settle
+           some other way entirely. -->
+      <div id="charge-reminder" class="hidden mb-2 text-xs" style="padding:8px 10px;border-radius:8px;background:var(--warn-soft);color:var(--warn)">
+        {{ icon('triangle-alert', size=13) }} Charge this on the Moneris terminal first — this button only saves the sale.
+      </div>
+
+      <!-- Hidden checkout form -->
+      <form method="post" action="/pos/checkout" id="checkout-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="payment_method" id="final-payment-method" value="Cash">
+        <input type="hidden" name="tendered" id="final-tendered" value="0">
+        <input type="hidden" name="cash_part" id="final-cash-part" value="0">
+        <input type="hidden" name="card_part" id="final-card-part" value="0">
+        <input type="hidden" name="card_reference" id="final-card-reference" value="">
+
+        <button type="button" onclick="submitCheckout()" id="charge-btn"
+          class="w-full py-4 rounded-xl font-bold text-lg transition-all"
+          style="{% if cart %}background:var(--accent);color:var(--on-accent){% else %}background:var(--surface-2);color:var(--text-3);cursor:not-allowed{% endif %}"
+          {% if not cart %}disabled{% endif %}>
+          Charge ${{ "%.2f"|format(total) }}
+        </button>
+      </form>
+
+      <form method="post" action="/pos/clear" class="mt-2" data-pos-ajax><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="w-full py-2 text-xs" style="color:var(--text-3)">Clear Cart</button>
+      </form>
+
+      <form method="post" action="/pos/layaway/new" class="mt-2" onsubmit="return confirm('Start a layaway for this cart? Stock will be reserved immediately.')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="flex items-center gap-2" style="margin-bottom:6px">
+          <input name="deposit" type="number" step="0.01" min="0" placeholder="Deposit $ (optional)" style="flex:1;font-size:12px;padding:6px;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:6px;color:var(--text)">
+          <input name="due_date" type="date" style="flex:1;font-size:12px;padding:6px;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:6px;color:var(--text)">
+        </div>
+        <button type="submit" class="w-full py-2 rounded-lg text-sm font-bold"
+          style="{% if cart and selected_customer %}background:var(--surface-3);color:var(--text){% else %}background:var(--surface-2);color:var(--text-3);cursor:not-allowed{% endif %}"
+          {% if not cart or not selected_customer %}disabled{% endif %}>
+          {{ icon('package') }} Start Layaway{% if not selected_customer %} (attach a customer first){% endif %}
+        </button>
+      </form>
+    </div>

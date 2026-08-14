@@ -36,7 +36,7 @@
     </tbody>
   </table>
   {% elif po.status == 'sent' %}
-  <form method="post" action="/purchase-orders/{{ po.id }}/receive">
+  <form method="post" action="/purchase-orders/{{ po.id }}/receive"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <table>
       <thead><tr><th>SKU</th><th>Name</th><th>Ordered</th><th>Unit Cost</th><th>Qty Actually Received</th></tr></thead>
       <tbody>
@@ -65,8 +65,8 @@
       {% endfor %}
     </tbody>
   </table>
-  <form method="post" action="/purchase-orders/{{ po.id }}/send" style="margin-top:10px">
-    <button class="btn-primary">📤 Mark as Sent to Supplier</button>
+  <form method="post" action="/purchase-orders/{{ po.id }}/send" style="margin-top:10px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="btn-primary">{{ icon('upload') }} Mark as Sent to Supplier</button>
   </form>
   {% if po.supplier and po.supplier.email %}
   <div class="hint" style="text-align:left;margin-top:6px">This will also email the order to {{ po.supplier.email }} if email is configured in Settings.</div>

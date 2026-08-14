@@ -5,6 +5,18 @@
 <div class="card" style="border-color:{{ 'var(--green)' if flash[0]=='green' else 'var(--red)' }}">{{ flash[1] }}</div>
 {% endif %}
 
+{% if warranty %}
+<div class="card" style="border-color:{{ 'var(--green)' if warranty.active else 'var(--red)' }};display:flex;align-items:center;gap:10px">
+  {% if warranty.active %}
+  <span class="badge badge-green">{{ icon('shield') }} Under Warranty</span>
+  <span>Covered until {{ warranty.expires.strftime('%b %d, %Y') }} ({{ warranty.days_remaining }} day{{ 's' if warranty.days_remaining != 1 }} left) — don't charge for this issue if it's the same repair.</span>
+  {% else %}
+  <span class="badge badge-red">Warranty Expired</span>
+  <span>Expired {{ warranty.expires.strftime('%b %d, %Y') }} ({{ repair.warranty_days }}-day warranty from collection on {{ warranty.collected_date.strftime('%b %d, %Y') }}).</span>
+  {% endif %}
+</div>
+{% endif %}
+
 <div class="card">
   {% for s in status_order %}
   <span class="pipeline-step {{ 'done' if loop.index0 < cur_idx else 'active' if loop.index0==cur_idx else '' }}">{{ status_labels[s] }}</span>
@@ -17,13 +29,14 @@
     <div class="total-row"><span>Customer</span><span>{{ repair.customer.name if repair.customer else '—' }} ({{ repair.customer.phone if repair.customer }})</span></div>
     <div class="total-row"><span>Issue</span><span>{{ repair.issue }}</span></div>
     <div class="total-row"><span>Description</span><span>{{ repair.description or '—' }}</span></div>
+    <div class="total-row"><span>IMEI / Serial</span><span>{{ repair.imei or '—' }}</span></div>
     <div class="total-row"><span>Technician</span><span>{{ repair.technician.name if repair.technician else 'Unassigned' }}</span></div>
     <div class="total-row"><span>Promised By</span><span>{{ repair.promised_by or '—' }}</span></div>
     <div class="total-row"><span>Warranty</span><span>{{ repair.warranty_days }} days</span></div>
     <div class="total-row"><span>Status</span><span><span class="badge {{ status_badge[repair.status] }}">{{ status_labels[repair.status] }}</span></span></div>
 
     {% if next_status %}
-    <form method="post" action="/repairs/{{ repair.id }}/advance" style="margin-top:12px">
+    <form method="post" action="/repairs/{{ repair.id }}/advance" style="margin-top:12px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input name="note" placeholder="Optional note" style="width:100%;margin-bottom:6px">
       <button class="btn-primary" style="width:100%">→ Move to: {{ status_labels[next_status] }}</button>
     </form>
@@ -32,24 +45,29 @@
     {% endif %}
 
     {% if repair.status in ['READY', 'COMPLETED'] %}
-    <form method="post" action="/repairs/{{ repair.id }}/charge" style="margin-top:8px">
+    <form method="post" action="/repairs/{{ repair.id }}/charge" style="margin-top:8px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button class="btn-primary" style="width:100%;background:var(--green);color:#062;font-weight:800">
-        💳 Charge &amp; Collect — ${{ "%.2f"|format(repair.final_cost if repair.final_cost is not none else (repair.estimated_cost or 0)) }}
+        {{ icon('credit-card') }} Charge &amp; Collect — ${{ "%.2f"|format(repair.final_cost if repair.final_cost is not none else (repair.estimated_cost or 0)) }}
       </button>
     </form>
     <div class="hint" style="text-align:left;margin-top:2px">Sends this ticket to the register, then marks it Collected once paid.</div>
     {% endif %}
 
     {% if repair.status=='READY' %}
-    <form method="post" action="/repairs/{{ repair.id }}/notify" style="margin-top:8px">
-      <button class="btn-secondary" style="width:100%">📱 Send Ready-for-Pickup SMS</button>
+    <form method="post" action="/repairs/{{ repair.id }}/notify" style="margin-top:8px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="btn-secondary" style="width:100%">{{ icon('smartphone') }} Send Ready-for-Pickup SMS</button>
     </form>
     {% endif %}
+
+    <form method="post" action="/repairs/{{ repair.id }}/imei" style="margin-top:12px;display:flex;gap:6px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input name="imei" placeholder="IMEI / serial number" value="{{ repair.imei }}" style="flex:1">
+      <button class="btn-secondary btn-sm">Save</button>
+    </form>
   </div>
 
   <div class="card">
     <h2>Costs</h2>
-    <form method="post" action="/repairs/{{ repair.id }}/cost">
+    <form method="post" action="/repairs/{{ repair.id }}/cost"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="form-group"><label>Estimated Cost</label><input name="estimated_cost" type="number" step="0.01" value="{{ repair.estimated_cost or '' }}"></div>
       <div class="form-group"><label>Final Cost</label><input name="final_cost" type="number" step="0.01" value="{{ repair.final_cost or '' }}"></div>
       <button class="btn-secondary">Save Costs</button>
@@ -88,7 +106,7 @@
         <td>${{ "%.2f"|format(p.unit_cost) }}</td>
         <td>${{ "%.2f"|format(p.qty * p.unit_cost) }}</td>
         <td>
-          <form method="post" action="/repairs/{{ repair.id }}/parts/{{ p.id }}/remove" onsubmit="return confirm('Remove this part and restore stock?')">
+          <form method="post" action="/repairs/{{ repair.id }}/parts/{{ p.id }}/remove" onsubmit="return confirm('Remove this part and restore stock?')"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn-secondary btn-sm">Remove</button>
           </form>
         </td>
@@ -97,9 +115,9 @@
     </tbody>
   </table>
   {% else %}
-  <div class="empty-state" style="padding:16px"><div class="icon">🔩</div>No parts logged yet.</div>
+  <div class="empty-state" style="padding:16px"><div class="icon">{{ icon('nut', size=32) }}</div>No parts logged yet.</div>
   {% endif %}
-  <form method="post" action="/repairs/{{ repair.id }}/parts/add" class="form-row" style="align-items:flex-end;margin-top:10px">
+  <form method="post" action="/repairs/{{ repair.id }}/parts/add" class="form-row" style="align-items:flex-end;margin-top:10px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="form-group" style="flex:2"><label>Product</label>
       <select name="product_id" required>
         <option value="">— select a part —</option>

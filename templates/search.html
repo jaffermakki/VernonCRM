@@ -8,7 +8,7 @@
 </div>
 
 {% if not q %}
-<div class="card"><div class="empty-state"><div class="icon">🔎</div>Type a customer name, phone number, invoice number, or device to search.</div></div>
+<div class="card"><div class="empty-state"><div class="icon">{{ icon('search', size=32) }}</div>Type a customer name, phone number, invoice number, or device to search.</div></div>
 {% else %}
 
 <div class="card">

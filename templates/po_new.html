@@ -2,7 +2,7 @@
 {% block content %}
 <div class="page-head"><div><div class="eyebrow">Purchasing</div><h1>New Purchase Order</h1></div></div>
 
-<form method="post" action="/purchase-orders/add">
+<form method="post" action="/purchase-orders/add"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <div class="card">
     <div class="form-row">
       <div class="form-group"><label>Supplier</label>

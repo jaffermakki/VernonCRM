@@ -50,11 +50,11 @@
 </head>
 <body>
 <div class="no-print">
-  <button onclick="window.print()">🖨️ Print Receipt</button>
+  <button onclick="window.print()">{{ icon('printer') }} Print Receipt</button>
 </div>
 
 <div class="center">
-  <img src="/static/logo.jpg" class="logo" alt="{{ shop.name }}"/>
+  <img src="/static/logo-dark.png" class="logo" alt="{{ shop.name }}"/>
   <div class="shop-name">{{ shop.name }}</div>
   <div class="shop-meta">
     {% if shop.address %}{{ shop.address }}<br/>{% endif %}
@@ -107,8 +107,7 @@
 <div class="footer-note">
   Thank you for choosing {{ shop.name }}!<br/>
   ────────────────<br/>
-  Keep this receipt for warranty/returns<br/>
-  <strong style="font-size:12px;letter-spacing:.5px">⚠️ NO REFUND — EXCHANGE ONLY</strong>
+  <strong style="font-size:12px;letter-spacing:.5px">{{ icon('triangle-alert') }} NO REFUND — EXCHANGE ONLY</strong>
 </div>
 </body>
 </html>

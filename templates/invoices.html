@@ -2,26 +2,27 @@
 {% block content %}
 <div class="page-head">
   <div><div class="eyebrow">Sales History</div><h1>Invoices</h1></div>
-  <div class="quick-actions"><a href="/pos" class="btn-primary" style="padding:9px 16px;border-radius:8px;font-weight:700">🛒 New Sale</a></div>
+  <div class="quick-actions"><a href="/pos" class="btn-primary" style="padding:9px 16px;border-radius:8px;font-weight:700">{{ icon('shopping-cart') }} New Sale</a></div>
 </div>
 
 <div class="stat-grid" style="grid-template-columns:repeat(2,1fr)">
   <div class="stat-card">
-    <span class="stat-icon">💰</span>
+    <span class="stat-icon">{{ icon('banknote') }}</span>
     <div class="stat-label" style="display:flex;align-items:center;gap:6px"><span class="pulse-live-dot"></span>Today's Sales</div>
     <div class="stat-value text-green">${{ "%.2f"|format(today_total) }}</div>
   </div>
   <div class="stat-card">
-    <span class="stat-icon">🧾</span>
+    <span class="stat-icon">{{ icon('receipt') }}</span>
     <div class="stat-label">Today's Invoices</div>
     <div class="stat-value">{{ today_count }}</div>
   </div>
 </div>
 
 <div class="card">
-  <input type="text" id="invoice-filter" placeholder="🔎 Filter by invoice #, customer, or payment method…"
-    style="width:100%;margin-bottom:12px;padding:9px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text)"
-    oninput="filterInvoices()">
+  <div class="search-box" style="max-width:none;margin-bottom:12px">
+    <span class="search-icon">{{ icon('search', size=15) }}</span>
+    <input type="text" id="invoice-filter" placeholder="Filter by invoice #, customer, or payment method…" oninput="filterInvoices()">
+  </div>
   <table id="invoice-table">
     <thead><tr><th>#</th><th>Customer</th><th>Payment</th><th>Total</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead>
     <tbody>
@@ -37,27 +38,27 @@
         <td class="text-muted">{{ inv.date.strftime('%b %d, %H:%M') }}</td>
         <td>{% if inv.refunded %}<span class="badge badge-red">Refunded</span>{% else %}<span class="badge badge-green">Paid</span>{% endif %}</td>
         <td style="display:flex;gap:4px;flex-wrap:wrap">
-          <a href="/invoices/{{ inv.id }}/thermal" target="_blank" class="btn-secondary btn-sm" title="Print receipt">🖨️</a>
+          <a href="/invoices/{{ inv.id }}/thermal" target="_blank" class="btn-secondary btn-sm" title="Print receipt">{{ icon('printer') }}</a>
           {% if inv.customer and inv.customer.email %}
-          <form method="post" action="/invoices/{{ inv.id }}/email">
+          <form method="post" action="/invoices/{{ inv.id }}/email"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="to_email" value="{{ inv.customer.email }}">
-            <button class="btn-secondary btn-sm" title="Email receipt to {{ inv.customer.email }}">✉️</button>
+            <button class="btn-secondary btn-sm" title="Email receipt to {{ inv.customer.email }}">{{ icon('mail') }}</button>
           </form>
           {% endif %}
           {% if inv.customer and inv.customer.phone %}
-          <form method="post" action="/invoices/{{ inv.id }}/sms">
+          <form method="post" action="/invoices/{{ inv.id }}/sms"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="to_phone" value="{{ inv.customer.phone }}">
-            <button class="btn-secondary btn-sm" title="SMS receipt to {{ inv.customer.phone }}">📱</button>
+            <button class="btn-secondary btn-sm" title="SMS receipt to {{ inv.customer.phone }}">{{ icon('smartphone') }}</button>
           </form>
           {% endif %}
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="7"><div class="empty-state"><div class="icon">🧾</div>No invoices yet — head to Point of Sale to ring one up.</div></td></tr>
+      <tr><td colspan="7"><div class="empty-state"><div class="icon">{{ icon('receipt', size=32) }}</div>No invoices yet — head to Point of Sale to ring one up.</div></td></tr>
       {% endfor %}
     </tbody>
   </table>
-  <div id="no-results" class="empty-state" style="display:none"><div class="icon">🔎</div>No invoices match that search.</div>
+  <div id="no-results" class="empty-state" style="display:none"><div class="icon">{{ icon('search', size=32) }}</div>No invoices match that search.</div>
 </div>
 
 <script>

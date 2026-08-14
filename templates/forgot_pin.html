@@ -2,7 +2,7 @@
 {% block bare_content %}
 <div class="login-wrap">
   <div class="login-box" style="width:320px">
-    <div style="font-size:13px;color:var(--text2);margin-bottom:14px">🔑 Account Recovery</div>
+    <div style="font-size:13px;color:var(--text2);margin-bottom:14px">{{ icon('key') }} Account Recovery</div>
 
     {% if locked %}
     <div class="error-text">Too many failed attempts. Try again in {{ lock_seconds }}s.</div>
@@ -26,7 +26,7 @@
 
     {% if error %}<div class="error-text" style="margin-bottom:10px">{{ error }}</div>{% endif %}
 
-    <form method="post" action="/forgot-pin">
+    <form method="post" action="/forgot-pin"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="form-group"><label>Owner Account</label>
         <select name="staff_id" required>
           {% for o in owners %}<option value="{{ o.id }}">{{ o.name }}</option>{% endfor %}

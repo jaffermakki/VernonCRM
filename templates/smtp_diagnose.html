@@ -5,7 +5,7 @@
 <div class="card" style="max-width:560px">
   <h2>Step-by-step connection test</h2>
   <p class="text-muted" style="font-size:12px">Runs each phase of the SMTP connection separately so you can see exactly where it fails, instead of a vague "didn't arrive" message.</p>
-  <form method="post" action="/settings/smtp-diagnose" style="display:flex;gap:8px;margin-top:10px">
+  <form method="post" action="/settings/smtp-diagnose" style="display:flex;gap:8px;margin-top:10px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input name="to_email" type="email" placeholder="Send test to this address" value="{{ to_email or '' }}" required style="flex:1">
     <button class="btn-primary">Run Diagnostic</button>
   </form>
@@ -17,7 +17,7 @@
   {% for status, label, detail in steps %}
   <div style="display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border)">
     <span style="font-size:18px;flex-shrink:0">
-      {% if status=='ok' %}✅{% elif status=='fail' %}❌{% else %}⚠️{% endif %}
+      {% if status=='ok' %}{{ icon('circle-check') }}{% elif status=='fail' %}{{ icon('circle-x') }}{% else %}{{ icon('triangle-alert') }}{% endif %}
     </span>
     <div>
       <div style="font-weight:700;font-size:13px">{{ label }}</div>
@@ -36,7 +36,7 @@
     <li>Check the inbox (and <strong>spam/junk folder</strong>) of the address you entered above.</li>
     {% set is_brevo = settings.get('smtp_host','') and 'brevo' in settings.get('smtp_host','').lower() %}
     {% if is_brevo %}
-    <li>If it's not there: <strong>the most likely cause is an unverified From address in Brevo</strong>. See the ⚠️ step above.</li>
+    <li>If it's not there: <strong>the most likely cause is an unverified From address in Brevo</strong>. See the {{ icon('triangle-alert') }} step above.</li>
     <li>Brevo verified sender fix: <a href="https://app.brevo.com" target="_blank">app.brevo.com</a> → Senders &amp; IPs → Senders → Add a sender → verify it.</li>
     <li>The From address you need to verify: <strong>{{ settings.get('smtp_from','') or settings.get('smtp_user','') }}</strong></li>
     {% endif %}
@@ -52,8 +52,8 @@
 {% endif %}
 
 {% if settings.get('smtp_host','') and 'brevo' in settings.get('smtp_host','').lower() %}
-<div class="card" style="max-width:560px;border-color:#fbbf24">
-  <h2 style="color:#fbbf24">Brevo setup checklist</h2>
+<div class="card" style="max-width:560px;border-color:var(--warn)">
+  <h2 style="color:var(--warn)">Brevo setup checklist</h2>
   <ul style="font-size:13px;line-height:2;padding-left:18px">
     <li>Host: <code>smtp-relay.brevo.com</code></li>
     <li>Port: <code>587</code></li>

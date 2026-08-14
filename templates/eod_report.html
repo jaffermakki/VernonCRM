@@ -6,12 +6,12 @@
   <form method="get" action="/reports/eod" style="display:flex;gap:8px;align-items:flex-end">
     <div class="form-group"><label>Month</label><input type="month" name="month" value="{{ month }}" onchange="this.form.submit()"></div>
   </form>
-  <a href="/reports/eod/print?month={{ month }}" target="_blank" class="btn-primary btn-sm">🖨️ Print Full Month Report</a>
+  <a href="/reports/eod/print?month={{ month }}" target="_blank" class="btn-primary btn-sm">{{ icon('printer') }} Print Full Month Report</a>
 </div>
 
 <div class="grid grid-4">
   <div class="card"><div class="stat-label">Month Revenue</div><div class="stat-value text-green">${{ "%.2f"|format(grand_revenue) }}</div></div>
-  <div class="card"><div class="stat-label">Tax Collected</div><div class="stat-value" style="color:#fbbf24">${{ "%.2f"|format(grand_tax) }}</div></div>
+  <div class="card"><div class="stat-label">Tax Collected</div><div class="stat-value" style="color:var(--warn)">${{ "%.2f"|format(grand_tax) }}</div></div>
   <div class="card"><div class="stat-label">Transactions</div><div class="stat-value">{{ grand_count }}</div></div>
   <div class="card"><div class="stat-label">Daily Average</div><div class="stat-value">${{ "%.2f"|format(daily_avg) }}</div></div>
 </div>
